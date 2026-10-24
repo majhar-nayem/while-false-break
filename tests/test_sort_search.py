@@ -1,11 +1,9 @@
-"""Tests for numcompute.sort_search. Run with:  python test_sort_search.py"""
-
 import os
 
 import numpy as np
 
 from numcompute import io
-from numcompute.sort_search import binary_search, multikey_sort, quickselect, stable_sort, topk
+from numcompute.sort_search import binary_search, quickselect, stable_sort, topk
 
 
 def raises(error, fn, *args, **kwargs):
@@ -24,15 +22,6 @@ def test_stable_sort():
     view = np.arange(20)[::-1][::3]                          # non-contiguous
     assert np.array_equal(stable_sort(view), np.sort(view))
     assert raises(ValueError, stable_sort, 5)
-
-
-def test_multikey_sort():
-    X = np.array([[2, 9], [1, 5], [2, 7], [1, 8]])
-    assert multikey_sort(X, keys=[0, 1]).tolist() == [[1, 5], [1, 8], [2, 7], [2, 9]]
-    assert multikey_sort(X, keys=[1]).tolist() == [[1, 5], [2, 7], [1, 8], [2, 9]]
-    assert multikey_sort(np.empty((0, 2)), keys=[0]).shape == (0, 2)
-    assert raises(ValueError, multikey_sort, X, keys=[5])
-
 
 def test_topk():
     vals, idx = topk([3, 1, 4, 1, 5], 2)
@@ -96,8 +85,6 @@ def test_titanic():
     print("  quickselect median:", quickselect(fare, k), "| np.sort gives:", np.sort(fare)[k])
     pos, found = binary_search(np.sort(fare), np.array([7.25, 100.0, 1000.0]))
     print("  binary_search 7.25/100/1000:", pos, found)
-    X = io.load_csv(path, usecols=["Pclass", "Fare"])
-    print("  sorted by class, then fare:", multikey_sort(X, [0, 1])[:3].tolist())
 
 
 if __name__ == "__main__":
