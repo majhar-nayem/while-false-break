@@ -14,7 +14,7 @@ used. The only dependency is NumPy.
 
 **Team:** While-False-Break
 
- Member | Student ID | Modules | Tests | Other work |
+| Member | Student ID | Modules | Tests | Other work |
 |---|---|---|---|---|
 | Shadid Chowdhury | a3232268 | `io`, `preprocessing`, `sort_search`, `rank` | `test_io`, `test_preprocessing`, `test_sort_search`, `test_rank` | benchmark script, README, final integration and bug fixes |
 | Member Name 2 | a0000000 | `stats`, `optim`, `metrics` | `test_stats`, `test_optim`, `test_metrics` | Packaging (`pyproject.toml`) |
@@ -53,12 +53,13 @@ tests and the demo. The package itself only needs `numpy>=1.24`.
 
 ## How to run
 
-| Task | Command | Make shortcut |
-|---|---|---|
-| Run the unit tests | `python -m pytest` | `make test` |
-| Run the benchmarks | `python benchmark/run_benchmarks.py` | `make bench` |
-| Re-run the demo notebook | `jupyter nbconvert --to notebook --execute --inplace demo/quickstart.ipynb` | `make demo` |
-| Open the demo interactively | `jupyter notebook demo/quickstart.ipynb` | |
+| Task | Command |
+|---|---|
+| Run the unit tests | `python -m pytest` |
+| Run the benchmarks | `python benchmark/run_benchmarks.py` |
+| Re-run the demo notebook | `jupyter nbconvert --to notebook --execute --inplace demo/quickstart.ipynb` |
+| Open the demo interactively | `jupyter notebook demo/quickstart.ipynb` |
+| Check code style | `python -m ruff check .` |
 
 The benchmark script prints a table and also saves it to `benchmark/results.md`.
 
@@ -82,12 +83,11 @@ while-false-break/
 ├── demo/
 │   ├── quickstart.ipynb     end-to-end demo on the Titanic dataset
 │   ├── svgplot.py           tiny SVG chart helper (so the demo needs no matplotlib)
-│   └── data/                Titanic CSV files from Kaggle
+│   └── data/train.csv       Titanic passenger list from Kaggle
 ├── benchmark/
 │   ├── run_benchmarks.py    loops vs vectorised benchmarks
 │   └── results.md           latest benchmark table
-├── pyproject.toml           packaging configuration
-└── makefile                 shortcuts for the commands above
+└── pyproject.toml           packaging configuration
 ```
 
 ## Quick examples

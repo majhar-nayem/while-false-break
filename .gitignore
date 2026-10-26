@@ -11,5 +11,3 @@ venv/
 htmlcov/
 .ipynb_checkpoints/
 .DS_Store
-report/*.aux
-report/*.log
