@@ -14,11 +14,11 @@ used. The only dependency is NumPy.
 
 **Team:** While-False-Break
 
-| Member | Student ID 
-|---|---|---|
-| Shadid Chowdhury | a3232268 
-| Member Name 2 | a0000000 
-| Member Name 3 | a0000000 
+ Member | Student ID | Modules | Tests | Other work |
+|---|---|---|---|---|
+| Shadid Chowdhury | a3232268 | `io`, `preprocessing`, `sort_search`, `rank` | `test_io`, `test_preprocessing`, `test_sort_search`, `test_rank` | benchmark script, README, final integration and bug fixes |
+| Member Name 2 | a0000000 | `stats`, `optim`, `metrics` | `test_stats`, `test_optim`, `test_metrics` | Packaging (`pyproject.toml`) |
+| Member Name 3 | a0000000 | `utils`, `pipeline`, `benchmarking` | `test_utils`, `test_pipeline`, `test_benchmarking` | Demo notebook (`demo/quickstart.ipynb`, `svgplot.py`) |
 
 ---
 
