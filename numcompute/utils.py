@@ -182,11 +182,17 @@ def softmax(x, axis=-1):
 
     Raises:
         TypeError if x is not numeric.
-        ValueError if x is 0-D.
+        ValueError if x is 0-D or empty.
 
     Notes:
         The max is subtracted first (softmax does not change when every value is
-        shifted by the same amount), so exp never overflows.
+        shifted by the same amount), so exp never overflows. Infinite values
+        are handled like logsumexp does:
+            - a slice containing +inf gives all its weight to the +inf entries
+              (shared equally), e.g. softmax([inf, 1]) = [1, 0]
+            - -inf entries get weight 0
+            - a slice where every value is -inf has no defined softmax -> NaN
+        NaN in a slice makes that slice NaN.
 
     Complexity:
         O(n) time and space.
@@ -194,9 +200,23 @@ def softmax(x, axis=-1):
     x = _check_numeric(x, "x")
     if x.ndim == 0:
         raise ValueError("x must have at least one dimension")
-    shifted = x - np.max(x, axis=axis, keepdims=True)
-    exp_values = np.exp(shifted)
-    return exp_values / np.sum(exp_values, axis=axis, keepdims=True)
+    if x.size == 0:
+        raise ValueError("x is empty")
+
+    shift = np.max(x, axis=axis, keepdims=True)
+    shift = np.where(np.isfinite(shift), shift, 0)  # shifting by +-inf would give NaN
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        exp_values = np.exp(x - shift)  # -inf -> 0; an overflowing difference -> 0 too
+        result = exp_values / np.sum(exp_values, axis=axis, keepdims=True)
+
+    # Slices with +inf: the limit of softmax puts all the weight on the +inf entries.
+    is_pos_inf = np.isposinf(x)
+    n_pos_inf = np.sum(is_pos_inf, axis=axis, keepdims=True)
+    has_nan = np.any(np.isnan(x), axis=axis, keepdims=True)
+    use_limit = (n_pos_inf > 0) & ~has_nan
+    with np.errstate(invalid="ignore", divide="ignore"):
+        limit = is_pos_inf / n_pos_inf
+    return np.where(use_limit, limit, result)
 
 
 def argtopk(x, k, axis=-1, largest=True):

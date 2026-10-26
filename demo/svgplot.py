@@ -6,6 +6,7 @@ Jupyter shows inline and which can be saved with fig.save("name.svg").
 """
 
 from html import escape
+from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
@@ -130,7 +131,7 @@ def histogram(counts, edges, title="", xlabel="", ylabel="Count"):
     Returns:
         Figure
     """
-    labels = [f"{lo:.0f}-{hi:.0f}" for lo, hi in zip(edges[:-1], edges[1:])]
+    labels = [f"{lo:.0f}-{hi:.0f}" for lo, hi in pairwise(edges)]
     return bar_chart(labels, counts, title, xlabel, ylabel)
 
 

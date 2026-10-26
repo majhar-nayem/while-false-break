@@ -78,7 +78,7 @@ while-false-break/
 │   ├── pipeline.py          Estimator base class, Pipeline, Compose, FeatureUnion, ColumnSelector
 │   ├── utils.py             distances, sigmoid, relu, logsumexp, softmax, argtopk, batching
 │   └── benchmarking.py      timing harness, comparison tables, environment info
-├── tests/                   68 unit tests (pytest), one file per module
+├── tests/                   69 unit tests (pytest), one file per module
 ├── demo/
 │   ├── quickstart.ipynb     end-to-end demo on the Titanic dataset
 │   ├── svgplot.py           tiny SVG chart helper (so the demo needs no matplotlib)
@@ -193,8 +193,8 @@ directly.
 python -m pytest
 ```
 
-There are **68 tests** across 10 files (one per module). Current result:
-`68 passed`. Besides normal cases, the tests cover the edge cases asked for in
+There are **69 tests** across 10 files (one per module). Current result:
+`69 passed`. Besides normal cases, the tests cover the edge cases asked for in
 the brief:
 
 - empty arrays and single-element arrays

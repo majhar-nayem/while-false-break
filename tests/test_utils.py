@@ -56,6 +56,21 @@ def test_softmax_stable():
         softmax(3.0)
 
 
+def test_softmax_infinite_and_empty():
+    with np.errstate(all="raise"):  # fails if any overflow / invalid warning is hit
+        assert softmax([np.inf, 1.0]).tolist() == [1.0, 0.0]
+        assert softmax([np.inf, np.inf, 1.0]).tolist() == [0.5, 0.5, 0.0]
+        assert softmax([-np.inf, 0.0]).tolist() == [0.0, 1.0]
+        assert softmax([1e308, -1e308]).tolist() == [1.0, 0.0]
+        assert np.all(np.isnan(softmax([-np.inf, -np.inf])))  # undefined -> NaN
+    assert np.all(np.isnan(softmax([np.nan, 1.0])))  # NaN propagates
+    X = np.array([[np.inf, 1.0], [1.0, 1.0]])
+    assert softmax(X, axis=1).tolist() == [[1.0, 0.0], [0.5, 0.5]]  # per-slice handling
+    assert softmax(X, axis=0).tolist() == [[1.0, 0.5], [0.0, 0.5]]
+    with pytest.raises(ValueError, match="empty"):
+        softmax([])
+
+
 def test_logsumexp():
     x = np.array([1.0, 2.0, 3.0])
     assert np.isclose(logsumexp(x), np.log(np.exp(x).sum()))
