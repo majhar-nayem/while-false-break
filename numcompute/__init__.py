@@ -1,6 +1,28 @@
 """NumCompute: a scientific computing toolkit built on plain Python and NumPy."""
 
-from numcompute import io
+from numcompute import (
+    benchmarking,
+    io,
+    metrics,
+    optim,
+    pipeline,
+    preprocessing,
+    rank,
+    sort_search,
+    stats,
+    utils,
+)
 
 __version__ = "0.1.0"
-__all__ = ["io"]
+__all__ = [
+    "benchmarking",
+    "io",
+    "metrics",
+    "optim",
+    "pipeline",
+    "preprocessing",
+    "rank",
+    "sort_search",
+    "stats",
+    "utils",
+]

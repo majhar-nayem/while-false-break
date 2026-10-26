@@ -1,853 +1,273 @@
-"""Transformer/Estimator protocol and composition (Pipeline, FeatureUnion).
+"""Transformer / Estimator protocol, Pipeline, Compose and FeatureUnion.
 
-The protocol mirrors scikit-learn's so that components are interchangeable:
-
-* **Transformer** - ``fit(X, y=None) -> self``, ``transform(X) -> X_out``,
-  and ``fit_transform`` provided by :class:`BaseTransformer`.
-* **Estimator**   - ``fit(X, y) -> self``, ``predict(X) -> y_pred``.
-
-Fitted state lives in attributes ending with ``_`` (e.g. ``mean_``). They
-are created only by ``fit``, which is how :func:`check_is_fitted` tells
-whether an object is fitted.
+The protocol is just method names:
+    Transformer (preprocessing step): fit(X, y=None) -> self, transform(X) -> X_new
+    Estimator   (model):              fit(X, y) -> self,      predict(X) -> y_pred
+Any object with these methods can be used as a step (duck typing); the base
+classes below only add fit_transform / fit_predict for free.
 """
-
-from __future__ import annotations
-
-import inspect
-from collections.abc import Callable, Sequence
-from typing import Protocol, runtime_checkable
 
 import numpy as np
 
-from numcompute.utils import NotFittedError
+from numcompute.preprocessing import Transformer
 
-__all__ = [
-    "Transformer",
-    "Estimator",
-    "BaseTransformer",
-    "BaseEstimator",
-    "check_is_fitted",
-    "Pipeline",
-    "Compose",
-    "FeatureUnion",
-    "ColumnSelector",
-    "FunctionTransformer",
-]
+__all__ = ["ColumnSelector", "Compose", "Estimator", "FeatureUnion", "Pipeline", "Transformer"]
 
 
-@runtime_checkable
-class Transformer(Protocol):
-    """Structural type of a transformer: anything with ``fit`` and ``transform``.
-
-    Used for ``isinstance`` checks (``isinstance(obj, Transformer)``); no
-    inheritance is needed. Subclass :class:`BaseTransformer` to also get
-    ``fit_transform``, ``get_params`` and ``set_params``.
-
-    Notes
-    -----
-    Complexity: defined by the implementing class.
-    """
-
-    def fit(self, X, y=None):
-        """Learn parameters from ``X`` and return ``self``."""
-        ...
-
-    def transform(self, X):
-        """Return the transformed ``X``."""
-        ...
-
-
-@runtime_checkable
-class Estimator(Protocol):
-    """Structural type of a predictive model: anything with ``fit`` and ``predict``.
-
-    Notes
-    -----
-    Complexity: defined by the implementing class.
-    """
+class Estimator:
+    """Base class for models: subclasses implement fit(X, y) and predict(X)."""
 
     def fit(self, X, y):
-        """Learn from ``X`` and targets ``y`` and return ``self``."""
-        ...
+        """Learn from X and y and return self (implemented by subclasses)."""
+        raise NotImplementedError
 
     def predict(self, X):
-        """Return predictions for ``X``."""
-        ...
-
-
-def check_is_fitted(obj, attributes: str | Sequence[str] | None = None) -> None:
-    """Raise :class:`NotFittedError` if ``obj`` has not been fitted.
-
-    Parameters
-    ----------
-    obj : object
-        Transformer or estimator.
-    attributes : str or sequence of str, optional
-        Attributes that ``fit`` sets. By default, any public attribute
-        ending in ``_`` counts as evidence of fitting.
-
-    Raises
-    ------
-    NotFittedError
-        If the attributes are missing.
-
-    Returns
-    -------
-    None
-
-    Notes
-    -----
-    Complexity: O(a) for a attributes (O(#attributes of obj) by default).
-    """
-    if attributes is None:
-        fitted = any(k.endswith("_") and not k.startswith("_") for k in vars(obj))
-    else:
-        attrs = [attributes] if isinstance(attributes, str) else attributes
-        fitted = all(hasattr(obj, a) for a in attrs)
-    if not fitted:
-        raise NotFittedError(
-            f"This {type(obj).__name__} instance is not fitted yet; call fit() first"
-        )
-
-
-class _ParamsMixin:
-    """``get_params``/``set_params`` and a readable ``repr`` from ``__init__``."""
-
-    @classmethod
-    def _param_names(cls) -> list[str]:
-        sig = inspect.signature(cls.__init__)
-        return [
-            p.name
-            for p in sig.parameters.values()
-            if p.name != "self" and p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD)
-        ]
-
-    def get_params(self) -> dict:
-        """Return constructor parameters as a dict.
-
-        Returns
-        -------
-        dict
-            Mapping of parameter name to current value.
-        """
-        return {k: getattr(self, k) for k in self._param_names() if hasattr(self, k)}
-
-    def set_params(self, **params):
-        """Set constructor parameters.
-
-        Parameters
-        ----------
-        **params
-            New parameter values.
-
-        Returns
-        -------
-        self
-
-        Raises
-        ------
-        ValueError
-            For unknown parameter names.
-        """
-        valid = set(self._param_names())
-        for k, v in params.items():
-            if k not in valid:
-                raise ValueError(f"invalid parameter {k!r} for {type(self).__name__}")
-            setattr(self, k, v)
-        return self
-
-    def __repr__(self) -> str:
-        args = ", ".join(f"{k}={v!r}" for k, v in self.get_params().items())
-        return f"{type(self).__name__}({args})"
-
-
-class BaseTransformer(_ParamsMixin):
-    """Base class for transformers: implement ``fit`` and ``transform``.
-
-    Notes
-    -----
-    Complexity: Defined by each subclass; ``fit_transform`` costs one ``fit`` plus one
-    ``transform``.
-    """
-
-    def fit(self, X, y=None):  # pragma: no cover - abstract
-        """Learn parameters from ``X``; return ``self``.
-
-        Parameters
-        ----------
-        X : array_like, shape (n, d)
-            Training data.
-        y : array_like, optional
-            Ignored by unsupervised transformers.
-
-        Returns
-        -------
-        self
-
-        Notes
-        -----
-        Complexity: Defined by the subclass.
-        """
-        raise NotImplementedError
-
-    def transform(self, X):  # pragma: no cover - abstract
-        """Apply the learned transformation to ``X``.
-
-        Parameters
-        ----------
-        X : array_like, shape (m, d)
-            Data to transform.
-
-        Returns
-        -------
-        X_out : ndarray
-
-        Notes
-        -----
-        Complexity: Defined by the subclass.
-        """
-        raise NotImplementedError
-
-    def fit_transform(self, X, y=None):
-        """Fit to ``X`` then transform it.
-
-        Parameters
-        ----------
-        X : array_like
-            Training data.
-        y : array_like, optional
-            Ignored by unsupervised transformers.
-
-        Returns
-        -------
-        X_out : ndarray
-
-        Notes
-        -----
-        Complexity: Cost of ``fit`` plus ``transform``.
-        """
-        return self.fit(X, y).transform(X)
-
-
-class BaseEstimator(_ParamsMixin):
-    """Base class for predictive models: implement ``fit`` and ``predict``.
-
-    Notes
-    -----
-    Complexity: Defined by each subclass.
-    """
-
-    def fit(self, X, y):  # pragma: no cover - abstract
-        """Learn from ``X`` and targets ``y``; return ``self``.
-
-        Parameters
-        ----------
-        X : array_like, shape (n, d)
-            Training data.
-        y : array_like, shape (n,)
-            Targets.
-
-        Returns
-        -------
-        self
-
-        Notes
-        -----
-        Complexity: Defined by the subclass.
-        """
-        raise NotImplementedError
-
-    def predict(self, X):  # pragma: no cover - abstract
-        """Predict targets for ``X``.
-
-        Parameters
-        ----------
-        X : array_like, shape (m, d)
-            Data to predict for.
-
-        Returns
-        -------
-        y_pred : ndarray, shape (m,)
-
-        Notes
-        -----
-        Complexity: Defined by the subclass.
-        """
+        """Return predictions for X (implemented by subclasses)."""
         raise NotImplementedError
 
     def fit_predict(self, X, y):
-        """Fit then predict on the same data.
-
-        Parameters
-        ----------
-        X : array_like
-        y : array_like
-
-        Returns
-        -------
-        y_pred : ndarray
-
-        Notes
-        -----
-        Complexity: Cost of ``fit`` plus ``predict``.
-        """
+        """Fit to (X, y), then predict X."""
         return self.fit(X, y).predict(X)
 
 
-def _is_transformer(step) -> bool:
-    return hasattr(step, "fit") and hasattr(step, "transform")
-
-
-def _validate_steps(steps, kind: str):
-    if not isinstance(steps, (list, tuple)) or not steps:
-        raise ValueError(f"{kind} needs a non-empty list of (name, object) tuples")
+def _check_steps(steps):
+    """Check that steps is a non-empty list of (name, step) pairs with unique names."""
+    if not isinstance(steps, (list, tuple)) or len(steps) == 0:
+        raise ValueError("steps must be a non-empty list of (name, step) pairs")
     names = []
     for item in steps:
-        if not (
-            isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
-        ):
-            raise TypeError(
-                f"each {kind} step must be a (str, object) tuple, got {item!r}"
-            )
+        if not (isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)):
+            raise ValueError(f"each step must be a (name, step) pair, got {item!r}")
         names.append(item[0])
-    dupes = {n for n in names if names.count(n) > 1}
-    if dupes:
-        raise ValueError(
-            f"{kind} step names must be unique; duplicated: {sorted(dupes)}"
-        )
-    bad = [n for n in names if "__" in n]
-    if bad:
-        raise ValueError(f"step names must not contain '__': {bad}")
+    if len(set(names)) != len(names):
+        raise ValueError(f"step names must be unique, got {names}")
     return list(steps)
 
 
-class Pipeline(_ParamsMixin):
-    """Chain transformers, optionally ending with an estimator.
+class Pipeline:
+    """
+    Chain steps so that each one is fitted on the output of the one before.
 
-    Parameters
-    ----------
-    steps : list of (str, object)
-        Every step but the last must be a transformer. The last may be a
-        transformer, an estimator, or ``"passthrough"``/``None`` (no-op).
+    Example (from the specification):
+        pipe = Pipeline([("scale", StandardScaler()), ("encode", OneHotEncoder())])
+        X_tr = pipe.fit_transform(X)
 
-    Attributes
-    ----------
-    named_steps : dict
-        Step objects by name.
+    Parameters:
+        steps : list of (name, step) pairs. Every step except the last must
+            be a transformer (fit + transform). The last step can be a
+            transformer or an estimator (fit + predict).
 
-    Raises
-    ------
-    TypeError
-        If a step is not a ``(name, object)`` tuple or an intermediate step
-        lacks ``fit``/``transform``.
-    ValueError
-        If names are duplicated or the list is empty.
+    Raises:
+        ValueError if steps is empty, a name is repeated, or a middle step
+            has no transform method.
+        TypeError if a step has no fit method.
 
-    Examples
-    --------
-    >>> from numcompute.preprocessing import StandardScaler, MinMaxScaler
-    >>> pipe = Pipeline([("std", StandardScaler()), ("mm", MinMaxScaler())])
-    >>> pipe.fit_transform([[1.0], [2.0], [3.0]]).ravel().tolist()
-    [0.0, 0.5, 1.0]
+    Use pipe["name"] to get a step back, e.g. to read a fitted scaler's mean_.
 
-    Notes
-    -----
-    Complexity: Each method costs the sum of the corresponding step costs; the pipeline
-    adds O(s) overhead for s steps.
+    Complexity:
+        the sum of the steps' own costs.
     """
 
     def __init__(self, steps):
-        self.steps = _validate_steps(steps, "Pipeline")
+        self.steps = _check_steps(steps)
+        for name, step in self.steps:
+            if not hasattr(step, "fit"):
+                raise TypeError(f"step {name!r} has no fit method")
         for name, step in self.steps[:-1]:
-            if not _is_transformer(step):
-                raise TypeError(
-                    f"intermediate step {name!r} ({type(step).__name__}) must "
-                    "implement fit and transform"
+            if not hasattr(step, "transform"):
+                raise ValueError(
+                    f"step {name!r} must have a transform method "
+                    "(only the last step can be a model)"
                 )
 
-    @property
-    def named_steps(self) -> dict:
-        """Steps as a ``{name: object}`` dict.
+    def __getitem__(self, name):
+        """Return the step with this name."""
+        return dict(self.steps)[name]
 
-        Returns
-        -------
-        dict
+    def __repr__(self):
+        names = [name for name, _ in self.steps]
+        return "Pipeline(" + " -> ".join(names) + ")"
 
-        Notes
-        -----
-        Complexity: O(s) for s steps.
-        """
-        return dict(self.steps)
+    def _last(self):
+        """Return the last step (a transformer or a model)."""
+        return self.steps[-1][1]
 
-    @property
-    def _final(self):
-        step = self.steps[-1][1]
-        return None if step in (None, "passthrough") else step
-
-    def __len__(self) -> int:
-        return len(self.steps)
-
-    def __getitem__(self, key):
-        """Return a step by index or name, or a sub-pipeline for a slice."""
-        if isinstance(key, slice):
-            return Pipeline(self.steps[key])
-        if isinstance(key, str):
-            return self.named_steps[key]
-        return self.steps[key][1]
-
-    def _transform_head(self, X, fit: bool, y=None):
+    def _transform_head(self, X, y=None, fit=False):
+        """Run X through every step except the last (fitting each one if fit=True)."""
         for _, step in self.steps[:-1]:
-            if not fit:
-                X = step.transform(X)
-            elif hasattr(step, "fit_transform"):
-                X = step.fit_transform(X, y)
-            else:  # the protocol only requires fit + transform
-                X = step.fit(X, y).transform(X)
+            if fit:
+                step.fit(X, y)
+            X = step.transform(X)
         return X
 
     def fit(self, X, y=None):
-        """Fit every step in order on the output of the previous one.
-
-        Parameters
-        ----------
-        X : array_like
-            Training data.
-        y : array_like, optional
-            Targets, passed to every step's ``fit``.
-
-        Returns
-        -------
-        self : Pipeline
-
-        Notes
-        -----
-        Complexity: Sum of the steps' ``fit_transform``/``fit`` costs.
         """
-        Xt = self._transform_head(X, fit=True, y=y)
-        if self._final is not None:
-            self._final.fit(Xt, y)
+        Fit every step in order.
+
+        Parameters:
+            X : array_like, input data
+            y : array_like, optional, targets (passed to every step's fit)
+
+        Returns:
+            self
+        """
+        X = self._transform_head(X, y, fit=True)
+        self._last().fit(X, y)
         return self
 
     def transform(self, X):
-        """Apply all transformers (the last step must be a transformer).
-
-        Parameters
-        ----------
-        X : array_like
-
-        Returns
-        -------
-        X_out : ndarray
-
-        Raises
-        ------
-        AttributeError
-            If the final step has no ``transform``.
-
-        Notes
-        -----
-        Complexity: Sum of the steps' ``transform`` costs.
         """
-        Xt = self._transform_head(X, fit=False)
-        if self._final is None:
-            return Xt
-        if not hasattr(self._final, "transform"):
-            raise AttributeError(f"final step {self.steps[-1][0]!r} has no transform()")
-        return self._final.transform(Xt)
+        Apply every fitted step to X. The last step must be a transformer.
+
+        Returns:
+            the output of the last step
+
+        Raises:
+            TypeError if the last step has no transform method.
+        """
+        if not hasattr(self._last(), "transform"):
+            raise TypeError("the last step has no transform method; use predict()")
+        X = self._transform_head(X)
+        return self._last().transform(X)
 
     def fit_transform(self, X, y=None):
-        """Fit all steps and return the transformed training data.
-
-        Parameters
-        ----------
-        X : array_like
-        y : array_like, optional
-
-        Returns
-        -------
-        X_out : ndarray
-
-        Notes
-        -----
-        Complexity: Sum of the steps' ``fit_transform`` costs.
-        """
-        Xt = self._transform_head(X, fit=True, y=y)
-        if self._final is None:
-            return Xt
-        if hasattr(self._final, "fit_transform"):
-            return self._final.fit_transform(Xt, y)
-        return self._final.fit(Xt, y).transform(Xt)
+        """Fit the pipeline, then transform X."""
+        return self.fit(X, y).transform(X)
 
     def predict(self, X):
-        """Transform ``X`` and call the final estimator's ``predict``.
-
-        Parameters
-        ----------
-        X : array_like
-
-        Returns
-        -------
-        y_pred : ndarray
-
-        Raises
-        ------
-        AttributeError
-            If the final step has no ``predict``.
-
-        Notes
-        -----
-        Complexity: Sum of the transformers' ``transform`` costs plus the estimator's
-        ``predict``.
         """
-        if not hasattr(self._final, "predict"):
-            raise AttributeError(f"final step {self.steps[-1][0]!r} has no predict()")
-        return self._final.predict(self._transform_head(X, fit=False))
+        Transform X with every step except the last, then call the last step's predict.
 
-    def fit_predict(self, X, y):
-        """Fit the pipeline and predict on the training data.
-
-        Parameters
-        ----------
-        X : array_like
-        y : array_like
-
-        Returns
-        -------
-        y_pred : ndarray
-
-        Notes
-        -----
-        Complexity: Cost of ``fit`` plus ``predict``.
+        Raises:
+            TypeError if the last step has no predict method.
         """
-        return self.fit(X, y).predict(X)
-
-    def get_params(self) -> dict:
-        """Return ``{"steps": steps}``.
-
-        Returns
-        -------
-        dict
-
-        Notes
-        -----
-        Complexity: O(1).
-        """
-        return {"steps": self.steps}
+        if not hasattr(self._last(), "predict"):
+            raise TypeError("the last step has no predict method; use transform()")
+        X = self._transform_head(X)
+        return self._last().predict(X)
 
 
-class Compose(Pipeline):
-    """Chain unnamed transformations: ``Compose([f, g, h])(X) == h(g(f(X)))``.
+class Compose:
+    """
+    Chain plain functions with no fitting: Compose([f, g])(X) == g(f(X)).
 
-    A lighter-weight :class:`Pipeline` for when step names are not needed.
-    Steps are named ``"step0"``, ``"step1"``, ... and plain callables (e.g.
-    ``np.log1p``) are wrapped in :class:`FunctionTransformer`, so stateless
-    functions and fitted transformers can be mixed. A Compose can be called
-    directly (``compose(X)``) once fitted.
+    Useful for fixed transforms such as np.log1p, or the .transform of an
+    already fitted transformer. Use Pipeline when the steps need fitting.
 
-    Parameters
-    ----------
-    transforms : sequence of transformer or callable
-        Applied left to right. The last element may also be an estimator.
+    Parameters:
+        functions : non-empty list of callables
 
-    Raises
-    ------
-    TypeError
-        If an element is neither a transformer/estimator nor callable.
-    ValueError
-        If ``transforms`` is empty.
+    Raises:
+        TypeError if an item is not callable.
+        ValueError if the list is empty.
 
-    Notes
-    -----
-    Complexity: the sum of the steps' costs.
-
-    Examples
-    --------
-    >>> from numcompute.preprocessing import MinMaxScaler
-    >>> c = Compose([np.log10, MinMaxScaler()])
-    >>> c.fit_transform([[1.0], [10.0], [100.0]]).ravel().tolist()
-    [0.0, 0.5, 1.0]
+    Complexity:
+        the sum of the functions' costs.
     """
 
-    def __init__(self, transforms):
-        transforms = list(transforms) if transforms is not None else []
-        if not transforms:
-            raise ValueError("Compose needs at least one transform")
-        steps = []
-        for i, t in enumerate(transforms):
-            if not hasattr(t, "fit"):
-                if not callable(t):
-                    raise TypeError(
-                        f"transform {i} ({type(t).__name__}) is neither a "
-                        "transformer nor callable"
-                    )
-                t = FunctionTransformer(t)
-            steps.append((f"step{i}", t))
-        self.transforms = transforms
-        super().__init__(steps)
+    def __init__(self, functions):
+        functions = list(functions)
+        if not functions:
+            raise ValueError("functions must not be empty")
+        for function in functions:
+            if not callable(function):
+                raise TypeError(f"{function!r} is not callable")
+        self.functions = functions
 
     def __call__(self, X):
-        """Apply the fitted chain to ``X`` (same as :meth:`transform`).
-
-        Parameters
-        ----------
-        X : array_like
-
-        Returns
-        -------
-        X_out : ndarray
-
-        Notes
-        -----
-        Complexity: the sum of the steps' ``transform`` costs.
-        """
-        return self.transform(X)
-
-    def get_params(self) -> dict:
-        """Return ``{"transforms": transforms}``.
-
-        Returns
-        -------
-        dict
-
-        Notes
-        -----
-        Complexity: O(1).
-        """
-        return {"transforms": self.transforms}
+        """Apply each function in turn to X."""
+        for function in self.functions:
+            X = function(X)
+        return X
 
 
-class FeatureUnion(BaseTransformer):
-    """Apply several transformers to the same input and concatenate columns.
+class FeatureUnion(Transformer):
+    """
+    Run several transformers on the same input and put their outputs side by side.
 
-    Parameters
-    ----------
-    transformer_list : list of (str, transformer)
-        Each transformer must output a 2-D array with ``n`` rows.
+    Example: scaled numeric columns next to one-hot encoded text columns,
+    with each branch starting with a ColumnSelector.
 
-    Raises
-    ------
-    TypeError
-        If an entry is not a ``(name, transformer)`` tuple.
-    ValueError
-        If names are duplicated or the list is empty.
+    Parameters:
+        transformers : list of (name, transformer) pairs; each output must be 2-D
+            with the same number of rows
 
-    Notes
-    -----
-    Complexity: the sum of the parts plus O(n * total_features) to stack.
+    Returns (transform):
+        ndarray, shape (n, total number of output columns)
 
-    Examples
-    --------
-    >>> from numcompute.preprocessing import StandardScaler, MinMaxScaler
-    >>> fu = FeatureUnion([("std", StandardScaler()), ("mm", MinMaxScaler())])
-    >>> fu.fit_transform([[1.0], [3.0]]).tolist()
-    [[-1.0, 0.0], [1.0, 1.0]]
+    Raises:
+        ValueError if the list is empty or names are repeated.
+
+    Complexity:
+        the sum of the transformers' costs, plus O(n * total columns) to join.
     """
 
-    def __init__(self, transformer_list):
-        self.transformer_list = _validate_steps(transformer_list, "FeatureUnion")
-        for name, t in self.transformer_list:
-            if not _is_transformer(t):
-                raise TypeError(f"{name!r} must implement fit and transform")
+    def __init__(self, transformers):
+        self.transformers = _check_steps(transformers)
+
+    def __getitem__(self, name):
+        """Return the transformer with this name."""
+        return dict(self.transformers)[name]
 
     def fit(self, X, y=None):
-        """Fit every transformer on ``X``.
-
-        Parameters
-        ----------
-        X : array_like
-        y : array_like, optional
-
-        Returns
-        -------
-        self : FeatureUnion
-
-        Notes
-        -----
-        Complexity: Sum of the transformers' ``fit`` costs.
-        """
-        for _, t in self.transformer_list:
-            t.fit(X, y)
-        self.n_outputs_ = len(self.transformer_list)
+        """Fit every transformer on the same X. Returns self."""
+        for _, transformer in self.transformers:
+            transformer.fit(X, y)
+        self.n_features_in_ = np.asarray(X).shape[1]
         return self
 
     def transform(self, X):
-        """Transform ``X`` with every transformer and hstack the results.
-
-        Parameters
-        ----------
-        X : array_like
-
-        Returns
-        -------
-        X_out : ndarray, shape (n, sum of output widths)
-
-        Raises
-        ------
-        NotFittedError
-            If called before ``fit``.
-        ValueError
-            If the parts have different numbers of rows.
-
-        Notes
-        -----
-        Complexity: Sum of the transformers' ``transform`` costs plus O(n w) to stack w
-        output columns.
-        """
-        check_is_fitted(self, "n_outputs_")
-        parts = [np.asarray(t.transform(X)) for _, t in self.transformer_list]
-        parts = [p.reshape(-1, 1) if p.ndim == 1 else p for p in parts]
-        rows = {p.shape[0] for p in parts}
-        if len(rows) > 1:
-            raise ValueError(
-                f"transformers returned different row counts: {sorted(rows)}"
-            )
-        if len({p.dtype.kind for p in parts}) > 1:
-            parts = [p.astype(object) for p in parts]
-        return np.hstack(parts)
+        """Transform X with every transformer and join the outputs column-wise."""
+        self._check_fitted()
+        outputs = [transformer.transform(X) for _, transformer in self.transformers]
+        return np.hstack(outputs)
 
 
-class ColumnSelector(BaseTransformer):
-    """Select columns of a 2-D array (use inside a FeatureUnion branch).
+class ColumnSelector(Transformer):
+    """
+    Keep only some columns of a 2-D array, optionally converting their type.
 
-    Parameters
-    ----------
-    columns : int or sequence of int
-        Column indices to keep.
-    dtype : data-type, optional
-        Cast the selection (e.g. ``float`` for numeric columns read from a
-        mixed object table).
+    Parameters:
+        columns : list of int, column indices to keep
+        dtype : optional, e.g. float or str, type to convert the selected columns to
 
-    Examples
-    --------
-    >>> ColumnSelector([0, 2]).fit_transform([[1, 2, 3], [4, 5, 6]]).tolist()
-    [[1, 3], [4, 6]]
+    Returns (transform):
+        ndarray, shape (n, len(columns))
 
-    Notes
-    -----
-    Complexity: O(n c) time and memory to copy c selected columns.
+    Raises:
+        ValueError if X is not 2-D or a column index is out of range.
+
+    Handy when one array mixes numbers and text (dtype=object): one branch
+    selects the number columns with dtype=float, another the text with dtype=str.
+
+    Complexity:
+        O(n * len(columns)) time and space.
     """
 
     def __init__(self, columns, dtype=None):
-        self.columns = columns
+        self.columns = list(columns)
         self.dtype = dtype
 
     def fit(self, X, y=None):
-        """Record the input width and validate the column indices.
-
-        Parameters
-        ----------
-        X : array_like, shape (n, d)
-        y : ignored
-
-        Returns
-        -------
-        self : ColumnSelector
-
-        Raises
-        ------
-        ValueError
-            If ``X`` is not 2-D or an index is out of range.
-
-        Notes
-        -----
-        Complexity: O(c) to validate c column indices.
-        """
+        """Check that X is 2-D and every column index exists. Returns self."""
         X = np.asarray(X)
         if X.ndim != 2:
             raise ValueError(f"X must be 2-D, got shape {X.shape}")
-        cols = np.atleast_1d(np.asarray(self.columns))
-        if cols.size and (cols.min() < -X.shape[1] or cols.max() >= X.shape[1]):
-            raise ValueError(
-                f"columns {cols.tolist()} out of range for {X.shape[1]} columns"
-            )
+        for column in self.columns:
+            if not 0 <= column < X.shape[1]:
+                raise ValueError(f"column {column} out of range for {X.shape[1]} columns")
         self.n_features_in_ = X.shape[1]
         return self
 
     def transform(self, X):
-        """Return the selected columns.
-
-        Parameters
-        ----------
-        X : array_like, shape (n, d)
-
-        Returns
-        -------
-        X_out : ndarray, shape (n, len(columns))
-
-        Raises
-        ------
-        NotFittedError
-            If called before ``fit``.
-        ValueError
-            If ``X`` has a different number of columns than at fit time.
-
-        Notes
-        -----
-        Complexity: O(n c) time and memory.
-        """
-        check_is_fitted(self, "n_features_in_")
+        """Return the selected columns of X, converted to dtype if one was given."""
+        self._check_fitted()
         X = np.asarray(X)
         if X.ndim != 2 or X.shape[1] != self.n_features_in_:
             raise ValueError(
-                f"X has shape {X.shape}, expected (n, {self.n_features_in_})"
+                f"X must be 2-D with {self.n_features_in_} columns, got shape {X.shape}"
             )
-        out = X[:, np.atleast_1d(np.asarray(self.columns))]
-        return out.astype(self.dtype) if self.dtype is not None else out
-
-
-class FunctionTransformer(BaseTransformer):
-    """Wrap a stateless function as a transformer.
-
-    Parameters
-    ----------
-    func : callable, optional
-        ``func(X) -> X_out``; ``None`` is the identity.
-
-    Examples
-    --------
-    >>> FunctionTransformer(np.log1p).fit_transform([[0.0]]).tolist()
-    [[0.0]]
-
-    Notes
-    -----
-    Complexity: The cost of ``func``.
-    """
-
-    def __init__(self, func: Callable | None = None):
-        self.func = func
-
-    def fit(self, X, y=None):
-        """No-op; returns ``self``.
-
-        Parameters
-        ----------
-        X : array_like
-        y : ignored
-
-        Returns
-        -------
-        self : FunctionTransformer
-
-        Notes
-        -----
-        Complexity: O(1).
-        """
-        self.fitted_ = True
-        return self
-
-    def transform(self, X):
-        """Apply ``func`` to ``X``.
-
-        Parameters
-        ----------
-        X : array_like
-
-        Returns
-        -------
-        X_out : ndarray
-
-        Notes
-        -----
-        Complexity: The cost of ``func``.
-        """
-        return np.asarray(X) if self.func is None else self.func(np.asarray(X))
+        selected = X[:, self.columns]
+        if self.dtype is not None:
+            selected = selected.astype(self.dtype)
+        return selected

@@ -1,307 +1,170 @@
-"""Micro-benchmark harness for comparing implementations (e.g. loop vs NumPy).
+"""Micro-benchmark harness: time functions and compare loops with vectorised code."""
 
-Timing methodology (the same idea as :mod:`timeit`):
-
-* ``time.perf_counter`` - monotonic, highest-resolution clock available.
-* **Warm-up** runs are discarded (caches, lazy imports, allocator).
-* **Auto-ranging** - each measurement repeats the call ``number`` times,
-  with ``number`` grown until one measurement takes at least
-  ``min_time``, so fast functions are not dominated by timer resolution.
-* **Repeats** - several measurements; ``best`` (minimum) is the least noisy
-  estimate of the true cost, ``median`` shows typical behaviour.
-* Results are reported per call, and :func:`environment_info` records the
-  machine so that tables are reproducible.
-"""
-
-from __future__ import annotations
-
-import csv
-import os
 import platform
 import statistics
 import sys
 import time
-from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass
 
 import numpy as np
 
-__all__ = [
-    "BenchmarkResult",
-    "benchmark",
-    "compare",
-    "environment_info",
-    "format_table",
-    "save_results",
-]
+# Stop growing the number of calls per round once it reaches this many.
+MAX_CALLS_PER_ROUND = 10**6
 
 
-@dataclass
-class BenchmarkResult:
-    """Timing summary of one implementation (all times in seconds per call).
+def _time_calls(func, args, n_calls):
+    """Call func(*args) n_calls times and return the total time in seconds."""
+    start = time.perf_counter()
+    for _ in range(n_calls):
+        func(*args)
+    return time.perf_counter() - start
 
-    Attributes
-    ----------
-    name : str
-        Label of the implementation.
-    best, median, mean, stdev : float
-        Statistics over the repeats.
-    repeat : int
-        Number of measurements.
-    number : int
-        Calls per measurement.
-    speedup : float or None
-        ``baseline.best / self.best`` when produced by :func:`compare`.
-    size : int or None
-        Problem size label, if given.
 
-    Notes
-    -----
-    A plain record; build it with :func:`benchmark` or :func:`compare`.
-    Complexity: O(1) memory.
+def _choose_number(func, args, min_time):
+    """Find a number of calls (1, 10, 100, ...) that takes at least min_time seconds."""
+    number = 1
+    while _time_calls(func, args, number) < min_time and number < MAX_CALLS_PER_ROUND:
+        number *= 10
+    return number
+
+
+def benchmark(func, *args, repeat=5, number=None, min_time=0.05):
     """
+    Time a function call.
 
-    name: str
-    best: float
-    median: float
-    mean: float
-    stdev: float
-    repeat: int
-    number: int
-    speedup: float | None = None
-    size: int | None = None
+    Parameters:
+        func : callable, called as func(*args)
+        args : arguments passed to func
+        repeat : int >= 1, number of timing rounds
+        number : int >= 1, calls per round; if None it is picked so that one
+            round takes at least min_time seconds (fast functions are run many
+            times so the timer's resolution does not matter)
+        min_time : float, target length of one round in seconds
 
+    Returns:
+        dict with "best" and "median" (seconds per call), "number" and "repeat"
 
-def benchmark(
-    func: Callable,
-    *args,
-    name: str | None = None,
-    repeat: int = 5,
-    number: int | None = None,
-    warmup: int = 1,
-    min_time: float = 0.05,
-    size: int | None = None,
-    **kwargs,
-) -> BenchmarkResult:
-    """Time ``func(*args, **kwargs)``.
+    Raises:
+        ValueError if repeat < 1 or number < 1.
 
-    Parameters
-    ----------
-    func : callable
-        Function under test.
-    *args, **kwargs
-        Arguments passed to ``func`` on every call.
-    name : str, optional
-        Label (defaults to ``func.__name__``).
-    repeat : int, default=5
-        Number of measurements.
-    number : int, optional
-        Calls per measurement; auto-ranged if omitted.
-    warmup : int, default=1
-        Untimed calls before measuring.
-    min_time : float, default=0.05
-        Target duration of one measurement when auto-ranging (seconds).
-    size : int, optional
-        Problem size, stored in the result for tables.
+    Notes:
+        One warm-up call is made first and not timed. "best" is the most useful
+        number: slower rounds are usually caused by other programs, not by func.
 
-    Returns
-    -------
-    BenchmarkResult
-
-    Raises
-    ------
-    ValueError
-        If ``repeat < 1``, ``number < 1`` or ``warmup < 0``.
-
-    Notes
-    -----
-    Complexity: ``warmup + repeat * number`` calls of ``func``.
+    Complexity:
+        About repeat * max(min_time, number * cost of func).
     """
-    if repeat < 1 or warmup < 0 or (number is not None and number < 1):
-        raise ValueError("need repeat >= 1, warmup >= 0 and number >= 1")
-    for _ in range(warmup):
-        func(*args, **kwargs)
+    if repeat < 1:
+        raise ValueError("repeat and number must be >= 1")
+    if number is not None and number < 1:
+        raise ValueError("repeat and number must be >= 1")
+
+    func(*args)  # warm-up call, not timed
+
     if number is None:
-        number = 1
-        while True:
-            t0 = time.perf_counter()
-            for _ in range(number):
-                func(*args, **kwargs)
-            if time.perf_counter() - t0 >= min_time or number >= 1_000_000:
-                break
-            number *= 10
+        number = _choose_number(func, args, min_time)
+
     times = []
     for _ in range(repeat):
-        t0 = time.perf_counter()
-        for _ in range(number):
-            func(*args, **kwargs)
-        times.append((time.perf_counter() - t0) / number)
-    return BenchmarkResult(
-        name=name or getattr(func, "__name__", "func"),
-        best=min(times),
-        median=statistics.median(times),
-        mean=statistics.fmean(times),
-        stdev=statistics.stdev(times) if len(times) > 1 else 0.0,
-        repeat=repeat,
-        number=number,
-        size=size,
-    )
+        total_time = _time_calls(func, args, number)
+        times.append(total_time / number)
+
+    return {
+        "best": min(times),
+        "median": statistics.median(times),
+        "number": number,
+        "repeat": repeat,
+    }
 
 
-def compare(
-    implementations: dict[str, Callable],
-    *args,
-    check: bool = True,
-    rtol: float = 1e-7,
-    atol: float = 1e-9,
-    size: int | None = None,
-    **bench_kwargs,
-) -> list[BenchmarkResult]:
-    """Benchmark several implementations of the same computation.
+def _check_same_results(funcs, args):
+    """Raise ValueError if any function gives a different result from the first one."""
+    names = list(funcs)
+    baseline_name = names[0]
+    expected = np.asarray(funcs[baseline_name](*args), dtype=float)
 
-    The first implementation is the baseline; each result's ``speedup`` is
-    ``baseline.best / result.best`` (so > 1 means faster than the baseline).
+    for name in names[1:]:
+        result = np.asarray(funcs[name](*args), dtype=float)
+        same_shape = result.shape == expected.shape
+        if not same_shape or not np.allclose(result, expected, equal_nan=True):
+            raise ValueError(f"{name!r} disagrees with {baseline_name!r}")
 
-    Parameters
-    ----------
-    implementations : dict of str -> callable
-        Ordered mapping; put the reference (e.g. the Python loop) first.
-    *args
-        Arguments passed to every implementation.
-    check : bool, default=True
-        Verify that all implementations return the same values as the
-        baseline (``np.allclose``) before timing, so a fast but wrong
-        version cannot win.
-    rtol, atol : float
-        Tolerances for ``check``.
-    size : int, optional
-        Problem size label.
-    **bench_kwargs
-        Forwarded to :func:`benchmark` (``repeat``, ``number``, ...).
 
-    Returns
-    -------
-    list of BenchmarkResult
-
-    Raises
-    ------
-    ValueError
-        If ``implementations`` is empty or outputs disagree.
-
-    Notes
-    -----
-    Complexity: one :func:`benchmark` per implementation.
+def compare(funcs, *args, repeat=5, check=True):
     """
-    if not implementations:
-        raise ValueError("implementations must not be empty")
-    items = list(implementations.items())
+    Time several implementations of the same thing and report the speed-up.
+
+    Parameters:
+        funcs : dict {name: callable}; the FIRST one is the baseline (e.g. the Python loop)
+        args : arguments passed to every function
+        repeat : int, timing rounds per function
+        check : bool, first check that every function returns the same result
+
+    Returns:
+        list of dicts with "name", "best", "median" and "speedup"
+        (speedup = baseline best time / this best time, so the baseline is 1.0)
+
+    Raises:
+        ValueError if funcs is empty, or check=True and a result differs from the baseline.
+
+    Complexity:
+        The sum of the benchmark costs.
+    """
+    if not funcs:
+        raise ValueError("funcs must not be empty")
     if check:
-        ref = np.asarray(items[0][1](*args), dtype=np.float64)
-        for name, fn in items[1:]:
-            got = np.asarray(fn(*args), dtype=np.float64)
-            if got.shape != ref.shape or not np.allclose(
-                got, ref, rtol=rtol, atol=atol, equal_nan=True
-            ):
-                raise ValueError(f"{name!r} disagrees with baseline {items[0][0]!r}")
-    results = [
-        benchmark(fn, *args, name=name, size=size, **bench_kwargs) for name, fn in items
-    ]
-    base = results[0].best
-    for r in results:
-        r.speedup = base / r.best if r.best > 0 else float("inf")
-    return results
+        _check_same_results(funcs, args)
+
+    rows = []
+    for name, func in funcs.items():
+        result = benchmark(func, *args, repeat=repeat)
+        rows.append({"name": name, "best": result["best"], "median": result["median"]})
+
+    baseline_time = rows[0]["best"]
+    for row in rows:
+        row["speedup"] = baseline_time / row["best"]
+    return rows
 
 
-def environment_info() -> dict:
-    """Describe the machine and library versions for reproducible reports.
+def _format_time(seconds):
+    """Format a time with a readable unit, e.g. 0.0023 -> '2.3 ms'."""
+    units = [("s", 1), ("ms", 1e-3), ("µs", 1e-6)]
+    for unit, scale in units:
+        if seconds >= scale:
+            return f"{seconds / scale:.3g} {unit}"
+    return f"{seconds / 1e-9:.3g} ns"
 
-    Returns
-    -------
-    dict
-        ``python``, ``numpy``, ``platform``, ``machine``, ``processor``,
-        ``cpu_count`` and ``blas`` (best effort).
 
-    Notes
-    -----
-    Complexity: O(1) (reads interpreter and platform metadata).
+def format_table(rows):
     """
-    blas = "unknown"
-    try:
-        cfg = np.show_config(mode="dicts")
-        blas = cfg.get("Build Dependencies", {}).get("blas", {}).get("name", "unknown")
-    except Exception:  # noqa: BLE001 - older numpy without mode="dicts"
-        pass
+    Format compare() results as a Markdown table.
+
+    Parameters:
+        rows : list of dicts from compare()
+
+    Returns:
+        str, a Markdown table with columns Implementation, Best, Median, Speed-up
+    """
+    lines = [
+        "| Implementation | Best | Median | Speed-up |",
+        "|---|---:|---:|---:|",
+    ]
+    for row in rows:
+        best = _format_time(row["best"])
+        median = _format_time(row["median"])
+        lines.append(f"| {row['name']} | {best} | {median} | {row['speedup']:.1f}x |")
+    return "\n".join(lines)
+
+
+def environment_info():
+    """
+    Details that affect timings, to report next to benchmark results.
+
+    Returns:
+        dict with "python", "numpy", "platform" and "processor"
+    """
     return {
         "python": sys.version.split()[0],
         "numpy": np.__version__,
         "platform": platform.platform(),
-        "machine": platform.machine(),
         "processor": platform.processor() or platform.machine(),
-        "cpu_count": os.cpu_count(),
-        "blas": blas,
     }
-
-
-def _fmt_time(t: float) -> str:
-    for unit, scale in (("s", 1.0), ("ms", 1e-3), ("µs", 1e-6)):
-        if t >= scale:
-            return f"{t / scale:.3g} {unit}"
-    return f"{t / 1e-9:.3g} ns"
-
-
-def format_table(results: Sequence[BenchmarkResult]) -> str:
-    """Render results as a Markdown table (paste into README/report).
-
-    Parameters
-    ----------
-    results : sequence of BenchmarkResult
-
-    Returns
-    -------
-    str
-        Markdown table with name, size, best, median and speed-up.
-
-    Notes
-    -----
-    Complexity: O(r) for r results.
-    """
-    lines = [
-        "| Implementation | n | Best | Median | Speed-up |",
-        "|---|---:|---:|---:|---:|",
-    ]
-    for r in results:
-        sp = "—" if r.speedup is None else f"{r.speedup:.1f}×"
-        n = "" if r.size is None else f"{r.size:,}"
-        lines.append(
-            f"| {r.name} | {n} | {_fmt_time(r.best)} | {_fmt_time(r.median)} | {sp} |"
-        )
-    return "\n".join(lines)
-
-
-def save_results(results: Sequence[BenchmarkResult], path: str | os.PathLike) -> None:
-    """Write results to CSV (one row per result, plus environment columns).
-
-    Parameters
-    ----------
-    results : sequence of BenchmarkResult
-    path : str or PathLike
-        Output file; parent directories must exist.
-
-    Returns
-    -------
-    None
-
-    Notes
-    -----
-    Complexity: O(r) for r results.
-    """
-    env = environment_info()
-    with open(path, "w", newline="") as fh:
-        rows = [
-            {**asdict(r), **{f"env_{k}": v for k, v in env.items()}} for r in results
-        ]
-        if not rows:
-            return
-        writer = csv.DictWriter(fh, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
