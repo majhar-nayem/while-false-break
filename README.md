@@ -14,11 +14,11 @@ used. The only dependency is NumPy.
 
 **Team:** While-False-Break
 
-| Member | Student ID | Contribution |
+| Member | Student ID 
 |---|---|---|
-| Member Name 1 | a0000000 | `io`, `preprocessing`, `sort_search`, `rank` and their tests |
-| Member Name 2 | a0000000 | `stats`, `optim`, `metrics` and their tests |
-| Member Name 3 | a0000000 | `utils`, `pipeline`, `benchmarking`, benchmark script and demo notebook |
+| Shadid Chowdhury | a3232268 
+| Member Name 2 | a0000000 
+| Member Name 3 | a0000000 
 
 ---
 
@@ -299,6 +299,3 @@ AI in the following ways:
 
 All code was written, tested and verified by the team, and we take responsibility
 for every part of the submission.
-
-**Reference:** Anthropic (2026) *Claude* [Large language model]. Available at:
-https://claude.ai (Accessed: October 2026).
