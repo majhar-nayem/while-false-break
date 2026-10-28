@@ -18,7 +18,7 @@ used. The only dependency is NumPy.
 |---|---|---|---|---|
 | Shadid Chowdhury | a3232268 | `io`, `preprocessing`, `sort_search`, `rank` | `test_io`, `test_preprocessing`, `test_sort_search`, `test_rank` | benchmark script, README, final integration and bug fixes |
 | Iftekhar Uddin Ahmed | a3191928 | `stats`, `optim`, `metrics` | `test_stats`, `test_optim`, `test_metrics` | Packaging (`pyproject.toml`) |
-| Majharul Islam | A3202747 | `utils`, `pipeline`, `benchmarking` | `test_utils`, `test_pipeline`, `test_benchmarking` | Demo notebook (`demo/quickstart.ipynb`, `svgplot.py`) |
+| Majharul Islam | a3202747 | `utils`, `pipeline`, `benchmarking` | `test_utils`, `test_pipeline`, `test_benchmarking` | Demo notebook (`demo/quickstart.ipynb`, `svgplot.py`) |
 
 ---
 
@@ -214,20 +214,20 @@ rounds is reported.
 
 | Implementation | Best | Median | Speed-up |
 |---|---:|---:|---:|
-| std: loop | 5.41 ms | 5.47 ms | 1.0x |
-| std: numcompute | 426 µs | 463 µs | 12.7x |
-| histogram (20 bins): loop | 7.88 ms | 8.19 ms | 1.0x |
-| histogram (20 bins): numcompute | 1.64 ms | 1.65 ms | 4.8x |
-| StandardScaler: loop | 6.06 ms | 6.2 ms | 1.0x |
-| StandardScaler: numcompute | 448 µs | 454 µs | 13.5x |
-| distances (200 x 8): loop | 5.93 ms | 5.98 ms | 1.0x |
-| distances (200 x 8): numcompute | 181 µs | 184 µs | 32.7x |
-| top-10: loop (heapq) | 643 µs | 681 µs | 1.0x |
-| top-10: numcompute | 468 µs | 478 µs | 1.4x |
-| median: loop (sorted) | 5.37 ms | 5.39 ms | 1.0x |
-| median: quickselect | 1.01 ms | 1.02 ms | 5.3x |
-| rank (average, ties): loop | 20.1 ms | 20.2 ms | 1.0x |
-| rank (average, ties): numcompute | 4.06 ms | 4.25 ms | 4.9x |
+| std: loop | 5.6 ms | 5.67 ms | 1.0x |
+| std: numcompute | 404 µs | 500 µs | 13.8x |
+| histogram (20 bins): loop | 11.9 ms | 15 ms | 1.0x |
+| histogram (20 bins): numcompute | 2.58 ms | 2.62 ms | 4.6x |
+| StandardScaler: loop | 7.86 ms | 8.32 ms | 1.0x |
+| StandardScaler: numcompute | 600 µs | 867 µs | 13.1x |
+| distances (200 x 8): loop | 9.55 ms | 11.7 ms | 1.0x |
+| distances (200 x 8): numcompute | 293 µs | 302 µs | 32.6x |
+| top-10: loop (heapq) | 867 µs | 1.19 ms | 1.0x |
+| top-10: numcompute | 669 µs | 787 µs | 1.3x |
+| median: loop (sorted) | 9.48 ms | 11.7 ms | 1.0x |
+| median: quickselect | 1.41 ms | 1.74 ms | 6.7x |
+| rank (average, ties): loop | 33.2 ms | 37.8 ms | 1.0x |
+| rank (average, ties): numcompute | 4.78 ms | 6.61 ms | 7.0x |
 
 Environment: Python 3.14.7, NumPy 2.5.4, Windows 11, Intel CPU.
 
