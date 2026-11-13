@@ -1,10 +1,21 @@
-"""Descriptive statistics, histogram, quantiles and streaming (Welford) stats.
+"""Descriptive statistics, histogram, quantiles and their streaming versions.
 
+Batch functions (mean, var, quantile, histogram, ...) work on one array.
 Axis rules follow NumPy: axis=None uses every value and returns a float,
 axis=0 gives one value per column, axis=1 one value per row.
 With ignore_nan=False (default) any NaN makes the result NaN; with
 ignore_nan=True NaN values are left out.
+
+Streaming classes are updated one chunk at a time and never keep the data:
+    RunningStats        mean / variance / std (Welford, Chan et al. merge)
+    StreamingHistogram  fixed-bin histogram with an optional sliding window,
+                        and approximate quantiles read from it
+    StreamingStats      all of the above behind one update_stats(X_chunk) call
+They always work per column: a chunk has shape (n, d), or (n,) for one column,
+and results have one entry per column.
 """
+
+from collections import deque
 
 import numpy as np
 
@@ -402,3 +413,350 @@ class RunningStats:
     def std(self, ddof=0):
         """Running standard deviation per column, shape (d,)."""
         return np.sqrt(self.var(ddof))
+
+
+def _as_columns(X, name="X"):
+    """Return X as a float array of shape (n, d); a 1-D X becomes one column."""
+    X = np.asarray(X)
+    if X.dtype.kind not in "biuf":
+        raise TypeError(f"{name} must be numeric, got dtype {X.dtype}")
+    X = X.astype(float)
+    if X.ndim == 1:
+        X = X[:, None]
+    if X.ndim != 2:
+        raise ValueError(f"{name} must be 1-D or 2-D, got shape {X.shape}")
+    return X
+
+
+class StreamingHistogram:
+    """
+    Equal-width histogram of each column, updated chunk by chunk.
+
+    Parameters:
+        bins : int >= 1, number of bins per column
+        range : (low, high), optional, the same for every column. Default: the
+            min and max of each column in the first chunk. Later values outside
+            the range are not binned but counted in n_below / n_above, so the
+            totals stay right; pass a range when the spread is known in advance.
+        window : int >= 1 or None. If set, only the last `window` chunks are
+            counted (a sliding window); older chunks are dropped.
+
+    Attributes (after the first update):
+        counts : ndarray of int, shape (d, bins)
+        edges : ndarray, shape (d, bins + 1)
+        n_below, n_above : ndarray of int, shape (d,), values outside the range
+        count : ndarray of int, shape (d,), non-NaN values counted
+
+    Raises:
+        ValueError for a bad bins, range or window, or a chunk whose number of
+            columns differs from the first chunk.
+        TypeError if a chunk is not numeric.
+        RuntimeError if results are read before the first update.
+
+    Notes:
+        Because the bins are equal width, a value's bin is found with one
+        division, floor((x - low) / width), for every value of every column at
+        once; np.bincount on column * bins + bin counts them all in one call.
+        NaN is ignored. The window keeps one small (d, bins) count array per
+        chunk and subtracts the oldest one when it falls out.
+
+    Complexity:
+        O(n * d + d * bins) time per update, O(window * d * bins) memory
+        (O(d * bins) without a window).
+    """
+
+    def __init__(self, bins=50, range=None, window=None):
+        if not isinstance(bins, (int, np.integer)) or bins < 1:
+            raise ValueError(f"bins must be a positive int, got {bins!r}")
+        if range is not None and not float(range[0]) < float(range[1]):
+            raise ValueError(f"range must have low < high, got {range}")
+        if window is not None and (not isinstance(window, (int, np.integer)) or window < 1):
+            raise ValueError(f"window must be a positive int or None, got {window!r}")
+        self.bins = int(bins)
+        self.range = range
+        self.window = window
+        self.reset()
+
+    def reset(self):
+        """Forget everything, including the bin edges. Returns self."""
+        self._low = None
+        self._high = None
+        self._chunks = deque()  # per-chunk (counts, below, above), only with a window
+        self._counts = None
+        self._below = None
+        self._above = None
+        return self
+
+    def _set_range(self, X):
+        """Fix the bin range of each column from the first chunk (or from self.range)."""
+        d = X.shape[1]
+        if self.range is not None:
+            self._low = np.full(d, float(self.range[0]))
+            self._high = np.full(d, float(self.range[1]))
+        else:
+            finite = np.isfinite(X)
+            any_value = finite.any(axis=0)
+            low = np.where(finite, X, np.inf).min(axis=0)
+            high = np.where(finite, X, -np.inf).max(axis=0)
+            low = np.where(any_value, low, 0.0)  # empty column: arbitrary range [0, 1]
+            high = np.where(any_value, high, 1.0)
+            constant = low == high  # all values equal: a range of width 1 around them
+            self._low = np.where(constant, low - 0.5, low)
+            self._high = np.where(constant, high + 0.5, high)
+        self._counts = np.zeros((d, self.bins), dtype=int)
+        self._below = np.zeros(d, dtype=int)
+        self._above = np.zeros(d, dtype=int)
+
+    def update(self, X_chunk):
+        """
+        Add a chunk of values.
+
+        Parameters:
+            X_chunk : array_like, shape (n,) or (n, d)
+
+        Returns:
+            self
+        """
+        X = _as_columns(X_chunk, "X_chunk")
+        if self._low is None:
+            self._set_range(X)
+        d = self._low.size
+        if X.shape[1] != d:
+            raise ValueError(f"expected {d} columns, got {X.shape[1]}")
+
+        valid = ~np.isnan(X)
+        below = (X < self._low) & valid
+        above = (X > self._high) & valid
+        inside = valid & ~below & ~above
+
+        width = (self._high - self._low) / self.bins
+        with np.errstate(invalid="ignore"):
+            bin_index = np.floor((X - self._low) / width)
+        bin_index = np.clip(np.nan_to_num(bin_index), 0, self.bins - 1).astype(int)  # x == high -> last bin
+        column = np.broadcast_to(np.arange(d), X.shape)
+        flat = column[inside] * self.bins + bin_index[inside]
+        counts = np.bincount(flat, minlength=d * self.bins).reshape(d, self.bins)
+        below = below.sum(axis=0)
+        above = above.sum(axis=0)
+
+        self._counts += counts
+        self._below += below
+        self._above += above
+        if self.window is not None:
+            self._chunks.append((counts, below, above))
+            if len(self._chunks) > self.window:
+                old_counts, old_below, old_above = self._chunks.popleft()
+                self._counts -= old_counts
+                self._below -= old_below
+                self._above -= old_above
+        return self
+
+    def _check_updated(self):
+        """Raise RuntimeError if no chunk has been added yet."""
+        if self._low is None:
+            raise RuntimeError("no data has been added yet; call update first")
+
+    @property
+    def counts(self):
+        """Counts per bin, shape (d, bins)."""
+        self._check_updated()
+        return self._counts.copy()
+
+    @property
+    def edges(self):
+        """Bin edges per column, shape (d, bins + 1)."""
+        self._check_updated()
+        steps = np.linspace(0.0, 1.0, self.bins + 1)
+        return self._low[:, None] + np.multiply.outer(self._high - self._low, steps)
+
+    @property
+    def n_below(self):
+        """Values below the range per column, shape (d,)."""
+        self._check_updated()
+        return self._below.copy()
+
+    @property
+    def n_above(self):
+        """Values above the range per column, shape (d,)."""
+        self._check_updated()
+        return self._above.copy()
+
+    @property
+    def count(self):
+        """Non-NaN values counted per column (inside and outside the range), shape (d,)."""
+        self._check_updated()
+        return self._counts.sum(axis=1) + self._below + self._above
+
+    def quantile(self, q):
+        """
+        Approximate quantiles of each column, read from the histogram.
+
+        Parameters:
+            q : float or array_like of floats in [0, 1]
+
+        Returns:
+            ndarray of shape (d,) for a scalar q, or q.shape + (d,);
+            NaN for a column with no values
+
+        Raises:
+            ValueError if q is outside [0, 1].
+
+        Notes:
+            The q * count-th value is found in the cumulative counts, and
+            values inside its bin are assumed to be spread evenly, so the
+            error is at most one bin width. A quantile that falls among the
+            values below (or above) the range is reported as the range's low
+            (or high) edge.
+
+        Complexity:
+            O(len(q) * d * bins) time and space.
+        """
+        self._check_updated()
+        q = np.asarray(q, dtype=float)
+        if np.isnan(q).any() or np.any((q < 0) | (q > 1)):
+            raise ValueError("q must be in the range [0, 1]")
+
+        total = self.count  # (d,)
+        target = np.multiply.outer(q, total)  # (..., d): how many values lie below the answer
+        cum_end = self._below[:, None] + np.cumsum(self._counts, axis=1)  # (d, bins)
+        cum_start = cum_end - self._counts
+
+        # Bin holding the target: the number of bins that end before it.
+        j = (cum_end < target[..., None]).sum(axis=-1)  # (..., d), bins means "above the range"
+        j_safe = np.minimum(j, self.bins - 1)
+        columns = np.arange(total.size)
+        in_bin = self._counts[columns, j_safe]
+        start = cum_start[columns, j_safe]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            fraction = np.where(in_bin > 0, (target - start) / in_bin, 0.0)
+        fraction = np.clip(fraction, 0.0, 1.0)
+        width = (self._high - self._low) / self.bins
+        value = self._low + (j_safe + fraction) * width
+
+        value = np.where(target <= self._below, self._low, value)
+        value = np.where(j >= self.bins, self._high, value)
+        return np.where(total > 0, value, np.nan)
+
+
+class StreamingStats:
+    """
+    Streaming summary of each column: count, mean, variance, min, max,
+    histogram and quantiles, all updated with one call per chunk.
+
+    Example:
+        stats = StreamingStats(bins=100)
+        for chunk in io.iter_csv_chunks(path, chunksize=200, usecols=[5, 9]):
+            stats.update_stats(chunk)
+        stats.mean, stats.std(), stats.quantile([0.25, 0.5, 0.75])
+
+    Parameters:
+        bins, range, window : passed to StreamingHistogram. The window only
+            applies to the histogram and quantiles; count, mean, variance,
+            min and max always cover the whole stream.
+
+    Raises:
+        TypeError if a chunk is not numeric.
+        ValueError if a chunk has a different number of columns.
+        RuntimeError if results are read before the first update.
+
+    Notes:
+        Mean and variance are exact (RunningStats merges each chunk's own
+        mean and M2 with Chan et al.'s formula, which stays accurate where
+        sum(x^2) - n * mean^2 would cancel). Quantiles are approximate, to
+        within one bin width, because exact quantiles would need every value.
+        NaN is ignored column by column; a column with no values gives NaN.
+
+    Complexity:
+        O(n * d + d * bins) time per chunk, O(d * bins) memory (times window).
+    """
+
+    def __init__(self, bins=50, range=None, window=None):
+        self._histogram = StreamingHistogram(bins=bins, range=range, window=window)
+        self.reset()
+
+    def reset(self):
+        """Forget all data. Returns self."""
+        self._moments = RunningStats()
+        self._histogram.reset()
+        self._min = None
+        self._max = None
+        self.n_chunks = 0
+        return self
+
+    def update_stats(self, X_chunk):
+        """
+        Add one chunk of rows.
+
+        Parameters:
+            X_chunk : array_like, shape (n, d), or (n,) for one column
+
+        Returns:
+            self
+        """
+        X = _as_columns(X_chunk, "X_chunk")
+        if self._min is not None and X.shape[1] != self._min.size:
+            raise ValueError(f"expected {self._min.size} columns, got {X.shape[1]}")
+        self._moments.update(X)
+        self._histogram.update(X)
+        valid = ~np.isnan(X)
+        chunk_min = np.where(valid, X, np.inf).min(axis=0)
+        chunk_max = np.where(valid, X, -np.inf).max(axis=0)
+        if self._min is None:
+            self._min, self._max = chunk_min, chunk_max
+        else:
+            self._min = np.minimum(self._min, chunk_min)
+            self._max = np.maximum(self._max, chunk_max)
+        self.n_chunks += 1
+        return self
+
+    def _check_updated(self):
+        """Raise RuntimeError if no chunk has been added yet."""
+        if self._min is None:
+            raise RuntimeError("no data has been added yet; call update_stats first")
+
+    @property
+    def count(self):
+        """Non-NaN values seen per column, shape (d,)."""
+        self._check_updated()
+        return self._moments.count.copy()
+
+    @property
+    def mean(self):
+        """Mean per column, shape (d,)."""
+        self._check_updated()
+        return self._moments.mean
+
+    def var(self, ddof=0):
+        """Variance per column, shape (d,); NaN where count <= ddof."""
+        self._check_updated()
+        return self._moments.var(ddof)
+
+    def std(self, ddof=0):
+        """Standard deviation per column, shape (d,)."""
+        return np.sqrt(self.var(ddof))
+
+    @property
+    def min(self):
+        """Minimum per column, shape (d,); NaN for a column with no values."""
+        self._check_updated()
+        return np.where(np.isinf(self._min) & (self._min > 0), np.nan, self._min)
+
+    @property
+    def max(self):
+        """Maximum per column, shape (d,); NaN for a column with no values."""
+        self._check_updated()
+        return np.where(np.isinf(self._max) & (self._max < 0), np.nan, self._max)
+
+    def quantile(self, q):
+        """Approximate quantiles per column (see StreamingHistogram.quantile)."""
+        self._check_updated()
+        return self._histogram.quantile(q)
+
+    def median(self):
+        """Approximate median per column, shape (d,)."""
+        return self.quantile(0.5)
+
+    def histogram(self):
+        """Return (counts, edges) with shapes (d, bins) and (d, bins + 1)."""
+        self._check_updated()
+        return self._histogram.counts, self._histogram.edges
