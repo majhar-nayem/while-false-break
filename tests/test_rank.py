@@ -1,10 +1,10 @@
-"""Tests for numcompute.rank. Run with:  python -m pytest tests/test_rank.py"""
+"""Tests for numcompute_stream.rank. Run with:  python -m pytest tests/test_rank.py"""
 
 import numpy as np
 import pytest
 
-from numcompute import io
-from numcompute.rank import percentile, rank
+from numcompute_stream import io
+from numcompute_stream.rank import percentile, rank
 
 
 def test_rank_ties():

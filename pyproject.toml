@@ -3,17 +3,17 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "numcompute"
-version = "1.0.0"
-description = "A scientific computing toolkit built on plain Python and NumPy."
+name = "numcompute-stream"
+version = "2.0.0"
+description = "A streaming decision-tree toolkit built on plain Python, NumPy and matplotlib."
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24"]
+dependencies = ["numpy>=1.24", "matplotlib>=3.7"]
 
 [project.optional-dependencies]
 dev = ["pytest", "jupyter", "ruff"]
 
 [tool.setuptools]
-packages = ["numcompute"]
+packages = ["numcompute", "numcompute_stream"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

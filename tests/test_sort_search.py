@@ -1,10 +1,10 @@
-"""Tests for numcompute.sort_search. Run with:  python -m pytest tests/test_sort_search.py"""
+"""Tests for numcompute_stream.sort_search. Run with:  python -m pytest tests/test_sort_search.py"""
 
 import numpy as np
 import pytest
 
-from numcompute import io
-from numcompute.sort_search import binary_search, quickselect, stable_sort, topk
+from numcompute_stream import io
+from numcompute_stream.sort_search import binary_search, quickselect, stable_sort, topk
 
 
 def test_stable_sort():

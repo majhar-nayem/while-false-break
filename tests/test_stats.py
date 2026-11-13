@@ -1,10 +1,20 @@
-"""Tests for numcompute.stats. Run with:  python -m pytest tests/test_stats.py"""
+"""Tests for numcompute_stream.stats. Run with:  python -m pytest tests/test_stats.py"""
 
 import numpy as np
 import pytest
 
-from numcompute import io
-from numcompute.stats import RunningStats, amax, amin, histogram, mean, median, quantile, std, var
+from numcompute_stream import io
+from numcompute_stream.stats import (
+    RunningStats,
+    amax,
+    amin,
+    histogram,
+    mean,
+    median,
+    quantile,
+    std,
+    var,
+)
 
 
 def test_basic_stats_match_numpy():

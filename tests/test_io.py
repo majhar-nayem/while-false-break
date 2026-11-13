@@ -1,4 +1,4 @@
-"""Tests for numcompute.io. Run with:  python -m pytest tests/test_io.py"""
+"""Tests for numcompute_stream.io. Run with:  python -m pytest tests/test_io.py"""
 
 import tempfile
 from pathlib import Path
@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from numcompute import io
+from numcompute_stream import io
 
 SAMPLE = 'id,name,age,city\n1,"Smith, John",25,adl\n2,"Lee, Ann",,syd\n3,Bob,40,NA\n'
 

@@ -1,10 +1,10 @@
-"""Tests for numcompute.optim. Run with:  python -m pytest tests/test_optim.py"""
+"""Tests for numcompute_stream.optim. Run with:  python -m pytest tests/test_optim.py"""
 
 import numpy as np
 import pytest
 
-from numcompute.optim import grad, jacobian
-from numcompute.utils import softmax
+from numcompute_stream.optim import grad, jacobian
+from numcompute_stream.utils import softmax
 
 
 def rosenbrock(v):

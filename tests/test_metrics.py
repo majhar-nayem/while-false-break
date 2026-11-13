@@ -1,9 +1,9 @@
-"""Tests for numcompute.metrics. Run with:  python -m pytest tests/test_metrics.py"""
+"""Tests for numcompute_stream.metrics. Run with:  python -m pytest tests/test_metrics.py"""
 
 import numpy as np
 import pytest
 
-from numcompute.metrics import (
+from numcompute_stream.metrics import (
     accuracy,
     auc,
     confusion_matrix,

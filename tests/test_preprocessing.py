@@ -1,10 +1,15 @@
-"""Tests for numcompute.preprocessing. Run with:  python -m pytest tests/test_preprocessing.py"""
+"""Tests for numcompute_stream.preprocessing. Run with:  python -m pytest tests/test_preprocessing.py"""
 
 import numpy as np
 import pytest
 
-from numcompute import io
-from numcompute.preprocessing import MinMaxScaler, OneHotEncoder, SimpleImputer, StandardScaler
+from numcompute_stream import io
+from numcompute_stream.preprocessing import (
+    MinMaxScaler,
+    OneHotEncoder,
+    SimpleImputer,
+    StandardScaler,
+)
 
 
 def test_standard_scaler():

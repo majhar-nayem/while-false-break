@@ -1,9 +1,9 @@
-"""Tests for numcompute.benchmarking. Run with:  python -m pytest tests/test_benchmarking.py"""
+"""Tests for numcompute_stream.benchmarking. Run with:  python -m pytest tests/test_benchmarking.py"""
 
 import numpy as np
 import pytest
 
-from numcompute.benchmarking import benchmark, compare, environment_info, format_table
+from numcompute_stream.benchmarking import benchmark, compare, environment_info, format_table
 
 
 def loop_sum(x):

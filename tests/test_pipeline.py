@@ -1,10 +1,15 @@
-"""Tests for numcompute.pipeline. Run with:  python -m pytest tests/test_pipeline.py"""
+"""Tests for numcompute_stream.pipeline. Run with:  python -m pytest tests/test_pipeline.py"""
 
 import numpy as np
 import pytest
 
-from numcompute.pipeline import ColumnSelector, Compose, Estimator, FeatureUnion, Pipeline
-from numcompute.preprocessing import MinMaxScaler, OneHotEncoder, SimpleImputer, StandardScaler
+from numcompute_stream.pipeline import ColumnSelector, Compose, Estimator, FeatureUnion, Pipeline
+from numcompute_stream.preprocessing import (
+    MinMaxScaler,
+    OneHotEncoder,
+    SimpleImputer,
+    StandardScaler,
+)
 
 
 class ThresholdModel(Estimator):

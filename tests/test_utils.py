@@ -1,9 +1,9 @@
-"""Tests for numcompute.utils. Run with:  python -m pytest tests/test_utils.py"""
+"""Tests for numcompute_stream.utils. Run with:  python -m pytest tests/test_utils.py"""
 
 import numpy as np
 import pytest
 
-from numcompute.utils import (
+from numcompute_stream.utils import (
     argtopk,
     batch_iterator,
     euclidean_distances,
