@@ -2,7 +2,10 @@
 
 from pathlib import Path
 
+import matplotlib
 import pytest
+
+matplotlib.use("Agg")  # plots in tests are drawn off-screen
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "demo" / "data"
 

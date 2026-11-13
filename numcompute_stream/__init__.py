@@ -10,10 +10,13 @@ from numcompute_stream import (
     rank,
     sort_search,
     stats,
+    stream,
+    tree,
     utils,
+    visualise,
 )
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __all__ = [
     "benchmarking",
     "io",
@@ -24,5 +27,8 @@ __all__ = [
     "rank",
     "sort_search",
     "stats",
+    "stream",
+    "tree",
     "utils",
+    "visualise",
 ]
