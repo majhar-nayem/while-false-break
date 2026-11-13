@@ -3,6 +3,7 @@
 The protocol is just method names:
     Transformer (preprocessing step): fit(X, y=None) -> self, transform(X) -> X_new
     Estimator   (model):              fit(X, y) -> self,      predict(X) -> y_pred
+    Streaming (both):                 partial_fit(X_chunk, y_chunk=None) -> self
 Any object with these methods can be used as a step (duck typing); the base
 classes below only add fit_transform / fit_predict for free.
 """
@@ -51,6 +52,14 @@ class Pipeline:
     Example (from the specification):
         pipe = Pipeline([("scale", StandardScaler()), ("encode", OneHotEncoder())])
         X_tr = pipe.fit_transform(X)
+
+    Streaming example:
+        pipe = Pipeline([
+            ("scale", StandardScaler()),
+            ("model", DecisionTreeClassifier(max_depth=5, buffer_size=500)),
+        ])
+        for X_chunk, y_chunk in stream:
+            pipe.partial_fit(X_chunk, y_chunk)
 
     Parameters:
         steps : list of (name, step) pairs. Every step except the last must
@@ -134,6 +143,39 @@ class Pipeline:
         """Fit the pipeline, then transform X."""
         return self.fit(X, y).transform(X)
 
+    def partial_fit(self, X, y=None):
+        """
+        Update every step with one more chunk.
+
+        Each transformer is updated with the chunk (partial_fit) and then
+        transforms it with what it has learned so far, so the next step sees
+        the chunk exactly as it would at prediction time. The last step gets
+        partial_fit(X_transformed, y).
+
+        Parameters:
+            X : array_like, one chunk of input rows
+            y : array_like, optional, the chunk's targets
+
+        Returns:
+            self
+
+        Raises:
+            TypeError if a step has no partial_fit method (the error names it).
+
+        Notes:
+            Transformers keep changing as chunks arrive (e.g. the scaler's
+            mean moves), so rows a buffered model stored earlier were
+            transformed with older statistics than rows stored later.
+        """
+        for name, step in self.steps:
+            if not hasattr(step, "partial_fit"):
+                raise TypeError(f"step {name!r} has no partial_fit method, so it cannot stream")
+        for _, step in self.steps[:-1]:
+            step.partial_fit(X, y)
+            X = step.transform(X)
+        self._last().partial_fit(X, y)
+        return self
+
     def predict(self, X):
         """
         Transform X with every step except the last, then call the last step's predict.
@@ -145,6 +187,18 @@ class Pipeline:
             raise TypeError("the last step has no predict method; use transform()")
         X = self._transform_head(X)
         return self._last().predict(X)
+
+    def predict_proba(self, X):
+        """
+        Transform X with every step except the last, then call the last step's predict_proba.
+
+        Raises:
+            TypeError if the last step has no predict_proba method.
+        """
+        if not hasattr(self._last(), "predict_proba"):
+            raise TypeError("the last step has no predict_proba method")
+        X = self._transform_head(X)
+        return self._last().predict_proba(X)
 
 
 class Compose:
@@ -216,6 +270,15 @@ class FeatureUnion(Transformer):
         self.n_features_in_ = np.asarray(X).shape[1]
         return self
 
+    def partial_fit(self, X, y=None):
+        """Update every transformer with one more chunk. Returns self."""
+        for name, transformer in self.transformers:
+            if not hasattr(transformer, "partial_fit"):
+                raise TypeError(f"transformer {name!r} has no partial_fit method")
+            transformer.partial_fit(X, y)
+        self.n_features_in_ = np.asarray(X).shape[1]
+        return self
+
     def transform(self, X):
         """Transform X with every transformer and join the outputs column-wise."""
         self._check_fitted()
@@ -258,6 +321,10 @@ class ColumnSelector(Transformer):
                 raise ValueError(f"column {column} out of range for {X.shape[1]} columns")
         self.n_features_in_ = X.shape[1]
         return self
+
+    def partial_fit(self, X, y=None):
+        """Nothing to learn: the same checks as fit. Returns self."""
+        return self.fit(X, y)
 
     def transform(self, X):
         """Return the selected columns of X, converted to dtype if one was given."""
