@@ -1,4 +1,19 @@
-"""Evaluation metrics: classification, regression (MSE), and ROC / AUC."""
+"""Evaluation metrics: classification, regression (MSE), and ROC / AUC.
+
+Batch functions (accuracy, precision, confusion_matrix, roc_curve, ...) score
+one pair of arrays. Streaming classes accumulate over chunks instead:
+
+    metric = StreamingAccuracy(window=None)
+    for y_true_chunk, y_pred_chunk in stream:
+        metric.update(y_true_chunk, y_pred_chunk)
+        metric.result()   # over everything so far (or the last `window` chunks)
+    metric.reset()
+
+Every streaming class has update(...) -> self, result() and reset() -> self.
+With window=w only the last w chunks count (a rolling-window metric).
+"""
+
+from collections import deque
 
 import numpy as np
 
@@ -276,3 +291,351 @@ def auc(x, y):
         raise ValueError("x must be increasing")
     average_heights = (y[1:] + y[:-1]) / 2
     return float(np.sum(widths * average_heights))
+
+
+class _ChunkWindow:
+    """
+    Running total of per-chunk arrays, optionally over the last `window` chunks only.
+
+    add() adds a chunk's array and, once there are more than `window` chunks,
+    subtracts the oldest one, so the total never has to be recomputed.
+    """
+
+    def __init__(self, window):
+        if window is not None and (not isinstance(window, (int, np.integer)) or window < 1):
+            raise ValueError(f"window must be a positive int or None, got {window!r}")
+        self.window = window
+        self.reset()
+
+    def reset(self):
+        self.total = None
+        self.parts = deque()
+        self.n_chunks = 0
+
+    def add(self, part):
+        self.total = part.copy() if self.total is None else self.total + part
+        self.n_chunks += 1
+        if self.window is not None:
+            self.parts.append(part)
+            if len(self.parts) > self.window:
+                self.total = self.total - self.parts.popleft()
+
+    def apply(self, func):
+        """Replace the total and every stored part with func(part) (used to add new labels)."""
+        if self.total is not None:
+            self.total = func(self.total)
+            self.parts = deque(func(part) for part in self.parts)
+
+
+class StreamingConfusionMatrix:
+    """
+    Confusion matrix accumulated over chunks (rows = true, columns = predicted).
+
+    Parameters:
+        labels : list, optional, class order. If given, a label outside it
+            raises ValueError. If None, the labels grow as new ones appear
+            (kept sorted) and the matrix grows with them.
+        window : int >= 1 or None, count only the last `window` chunks
+
+    Attributes:
+        labels_ : ndarray, the current class order
+        n_samples_ : int, samples counted (inside the window)
+
+    Raises:
+        ValueError for chunks that are not 1-D, differ in length, or (with
+            fixed labels) contain an unknown label.
+        RuntimeError from result() before any update.
+
+    Notes:
+        Each chunk is counted with the same bincount trick as confusion_matrix:
+        the pair (true, pred) becomes the single code true * k + pred.
+        An empty chunk is ignored.
+
+    Complexity:
+        O(n log k + k^2) time per chunk, O(k^2) memory (times window).
+    """
+
+    def __init__(self, labels=None, window=None):
+        self.fixed_labels = labels is not None
+        self.labels_ = np.asarray(labels) if labels is not None else None
+        self._window = _ChunkWindow(window)
+
+    def reset(self):
+        """Forget all counts (inferred labels are forgotten too). Returns self."""
+        self._window.reset()
+        if not self.fixed_labels:
+            self.labels_ = None
+        return self
+
+    def _add_labels(self, values):
+        """Grow labels_ (and every stored matrix) to include the new values."""
+        new_labels = np.unique(values) if self.labels_ is None else np.union1d(self.labels_, values)
+        if self.labels_ is not None and new_labels.size == self.labels_.size:
+            return
+        if self.labels_ is not None:
+            old_index = np.searchsorted(new_labels, self.labels_)
+            k = new_labels.size
+
+            def grow(matrix):
+                bigger = np.zeros((k, k), dtype=matrix.dtype)
+                bigger[np.ix_(old_index, old_index)] = matrix
+                return bigger
+
+            self._window.apply(grow)
+        self.labels_ = new_labels
+
+    def update(self, y_true_chunk, y_pred_chunk):
+        """
+        Add one chunk of true and predicted labels.
+
+        Parameters:
+            y_true_chunk, y_pred_chunk : array_like, shape (n,)
+
+        Returns:
+            self
+        """
+        y_true = np.asarray(y_true_chunk)
+        y_pred = np.asarray(y_pred_chunk)
+        if y_true.ndim != 1 or y_pred.ndim != 1 or y_true.size != y_pred.size:
+            raise ValueError(
+                f"chunks must be 1-D with the same length, got {y_true.shape} and {y_pred.shape}"
+            )
+        if y_true.size == 0:
+            return self
+        if not self.fixed_labels:
+            self._add_labels(np.concatenate([y_true, y_pred]))
+
+        labels = self.labels_
+        order = np.argsort(labels)
+        sorted_labels = labels[order]
+        true_codes, true_known = _label_codes(y_true, labels, order, sorted_labels)
+        pred_codes, pred_known = _label_codes(y_pred, labels, order, sorted_labels)
+        if not (true_known.all() and pred_known.all()):
+            unknown = np.unique(np.concatenate([y_true[~true_known], y_pred[~pred_known]]))
+            raise ValueError(f"labels {unknown.tolist()} are not in labels {labels.tolist()}")
+
+        k = labels.size
+        counts = np.bincount(true_codes * k + pred_codes, minlength=k * k).reshape(k, k)
+        if self._window.total is None:
+            self._window.total = np.zeros((k, k), dtype=int)
+            self._window.n_chunks = 0
+        self._window.add(counts)
+        return self
+
+    def result(self):
+        """Return the accumulated matrix, shape (k, k), in the order of labels_."""
+        if self._window.total is None:
+            raise RuntimeError("no data has been added yet; call update first")
+        return self._window.total.copy()
+
+    @property
+    def n_samples_(self):
+        return 0 if self._window.total is None else int(self._window.total.sum())
+
+
+class _StreamingLabelMetric:
+    """Shared code for metrics computed from a StreamingConfusionMatrix."""
+
+    def __init__(self, labels=None, window=None):
+        self.confusion = StreamingConfusionMatrix(labels=labels, window=window)
+
+    def update(self, y_true_chunk, y_pred_chunk):
+        """Add one chunk of true and predicted labels. Returns self."""
+        self.confusion.update(y_true_chunk, y_pred_chunk)
+        return self
+
+    def reset(self):
+        """Forget all chunks. Returns self."""
+        self.confusion.reset()
+        return self
+
+    def _pos_counts(self, pos_label):
+        """True positives, false positives and false negatives for pos_label."""
+        matrix = self.confusion.result()
+        found = np.flatnonzero(self.confusion.labels_ == pos_label)
+        if found.size == 0:  # positive class never seen: no TP, FP or FN
+            return 0, 0, 0
+        p = found[0]
+        tp = matrix[p, p]
+        return tp, matrix[:, p].sum() - tp, matrix[p, :].sum() - tp
+
+
+class StreamingAccuracy(_StreamingLabelMetric):
+    """
+    Accuracy over every chunk so far (or the last `window` chunks).
+
+    Parameters:
+        labels : list, optional (see StreamingConfusionMatrix)
+        window : int >= 1 or None
+
+    result() returns a float in [0, 1]; RuntimeError before any update.
+
+    Complexity:
+        O(n log k + k^2) per update, O(1) for result.
+    """
+
+    def result(self):
+        matrix = self.confusion.result()
+        return _safe_ratio(np.trace(matrix), matrix.sum())
+
+
+class StreamingPrecision(_StreamingLabelMetric):
+    """
+    Precision TP / (TP + FP) for pos_label, accumulated over chunks.
+
+    Parameters:
+        pos_label : the label that counts as positive (default 1)
+        labels, window : see StreamingConfusionMatrix
+
+    result() returns a float in [0, 1], 0.0 if nothing was predicted positive.
+    """
+
+    def __init__(self, pos_label=1, labels=None, window=None):
+        super().__init__(labels=labels, window=window)
+        self.pos_label = pos_label
+
+    def result(self):
+        tp, fp, _ = self._pos_counts(self.pos_label)
+        return _safe_ratio(tp, tp + fp)
+
+
+class StreamingRecall(StreamingPrecision):
+    """Recall TP / (TP + FN) for pos_label over chunks; 0.0 if there are no real positives."""
+
+    def result(self):
+        tp, _, fn = self._pos_counts(self.pos_label)
+        return _safe_ratio(tp, tp + fn)
+
+
+class StreamingF1(StreamingPrecision):
+    """F1 = 2TP / (2TP + FP + FN) for pos_label over chunks; 0.0 if there are no positives."""
+
+    def result(self):
+        tp, fp, fn = self._pos_counts(self.pos_label)
+        return _safe_ratio(2 * tp, 2 * tp + fp + fn)
+
+
+class StreamingMSE:
+    """
+    Mean squared error accumulated over chunks: a running sum of squared errors and a count.
+
+    Parameters:
+        window : int >= 1 or None
+
+    Raises:
+        TypeError / ValueError as mse; RuntimeError from result() before any update.
+
+    Complexity:
+        O(n) per update, O(1) memory (times window).
+    """
+
+    def __init__(self, window=None):
+        self._window = _ChunkWindow(window)
+
+    def update(self, y_true_chunk, y_pred_chunk):
+        """Add one chunk. Returns self."""
+        y_true, y_pred = _check_pair(y_true_chunk, y_pred_chunk, numeric=True)
+        errors = y_true.astype(float) - y_pred
+        self._window.add(np.array([np.sum(errors**2), errors.size]))
+        return self
+
+    def reset(self):
+        """Forget all chunks. Returns self."""
+        self._window.reset()
+        return self
+
+    def result(self):
+        if self._window.total is None:
+            raise RuntimeError("no data has been added yet; call update first")
+        squared_sum, count = self._window.total
+        return float(squared_sum / count) if count > 0 else 0.0
+
+
+class StreamingAUC:
+    """
+    ROC AUC accumulated over chunks, from histograms of the scores.
+
+    An exact AUC needs every score ever seen. Instead the scores of the
+    positive and of the negative samples are counted in `bins` equal-width
+    bins over `range`. The AUC is the chance that a random positive scores
+    higher than a random negative:
+        AUC = sum_b pos[b] * (neg below bin b + 0.5 * neg[b]) / (P * N)
+    Samples in the same bin count as a tie (one half), exactly as tied
+    scores do in roc_curve, so the result is exact whenever different scores
+    never share a bin, and otherwise off by at most the share of pairs that do.
+
+    Parameters:
+        pos_label : the label that counts as positive (default 1)
+        bins : int >= 1 (default 1000)
+        range : (low, high), score range (default (0, 1) for probabilities);
+            scores outside it are counted in the first or last bin
+        window : int >= 1 or None
+
+    Raises:
+        TypeError if scores are not numeric.
+        ValueError for bad chunks or scores containing NaN.
+        RuntimeError from result() before any update.
+
+    Returns (result):
+        float in [0, 1], or NaN while only one class has been seen.
+
+    Complexity:
+        O(n + bins) per update, O(bins) for result, O(bins) memory (times window).
+    """
+
+    def __init__(self, pos_label=1, bins=1000, range=(0.0, 1.0), window=None):
+        if not isinstance(bins, (int, np.integer)) or bins < 1:
+            raise ValueError(f"bins must be a positive int, got {bins!r}")
+        if not float(range[0]) < float(range[1]):
+            raise ValueError(f"range must have low < high, got {range}")
+        self.pos_label = pos_label
+        self.bins = int(bins)
+        self.range = (float(range[0]), float(range[1]))
+        self._window = _ChunkWindow(window)
+
+    def update(self, y_true_chunk, y_score_chunk):
+        """Add one chunk of true labels and scores (higher = more likely positive). Returns self."""
+        y_true, y_score = _check_pair(y_true_chunk, y_score_chunk)
+        if y_score.dtype.kind not in NUMERIC_KINDS:
+            raise TypeError("y_score must be numeric")
+        y_score = y_score.astype(float)
+        if np.isnan(y_score).any():
+            raise ValueError("y_score contains NaN")
+        low, high = self.range
+        bin_index = np.floor((y_score - low) / (high - low) * self.bins)
+        bin_index = np.clip(bin_index, 0, self.bins - 1).astype(int)
+        is_pos = (y_true == self.pos_label).astype(int)
+        # Row 0 counts negatives, row 1 positives: one bincount for both.
+        counts = np.bincount(is_pos * self.bins + bin_index, minlength=2 * self.bins)
+        self._window.add(counts.reshape(2, self.bins))
+        return self
+
+    def reset(self):
+        """Forget all chunks. Returns self."""
+        self._window.reset()
+        return self
+
+    def result(self):
+        if self._window.total is None:
+            raise RuntimeError("no data has been added yet; call update first")
+        neg, pos = self._window.total
+        n_neg, n_pos = neg.sum(), pos.sum()
+        if n_neg == 0 or n_pos == 0:
+            return float("nan")
+        neg_below = np.cumsum(neg) - neg
+        return float(np.sum(pos * (neg_below + 0.5 * neg)) / (n_pos * n_neg))
+
+    def roc_curve(self):
+        """
+        Approximate ROC curve, one point per bin edge from high to low.
+
+        Returns:
+            fpr, tpr : ndarray, shape (bins + 1,), from (0, 0) to (1, 1)
+        """
+        if self._window.total is None:
+            raise RuntimeError("no data has been added yet; call update first")
+        neg, pos = self._window.total
+        fp = np.concatenate([[0], np.cumsum(neg[::-1])])
+        tp = np.concatenate([[0], np.cumsum(pos[::-1])])
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return fp / neg.sum(), tp / pos.sum()
