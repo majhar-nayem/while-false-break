@@ -1,4 +1,7 @@
-"""Tests for numcompute_stream.preprocessing. Run with:  python -m pytest tests/test_preprocessing.py"""
+"""Tests for numcompute_stream.preprocessing.
+
+Run with:  python -m pytest tests/test_preprocessing.py
+"""
 
 import numpy as np
 import pytest

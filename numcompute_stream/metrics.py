@@ -9,8 +9,10 @@ one pair of arrays. Streaming classes accumulate over chunks instead:
         metric.result()   # over everything so far (or the last `window` chunks)
     metric.reset()
 
-Every streaming class has update(...) -> self, result() and reset() -> self.
-With window=w only the last w chunks count (a rolling-window metric).
+Every streaming class implements the StreamingMetric interface:
+update(...) -> self, result() and reset() -> self. With window=w only the last
+w chunks count (a rolling-window metric). Any object with these three methods
+can be logged by stream.StreamTrainer.
 """
 
 from collections import deque
@@ -293,6 +295,29 @@ def auc(x, y):
     return float(np.sum(widths * average_heights))
 
 
+class StreamingMetric:
+    """
+    Interface shared by every streaming metric.
+
+    update(y_true_chunk, y_other_chunk) adds one chunk (y_other is the
+    prediction, or the score for AUC) and returns self; result() returns the
+    value over the chunks seen so far (or the window); reset() forgets them
+    and returns self. Subclasses implement all three.
+    """
+
+    def update(self, y_true_chunk, y_other_chunk):
+        """Add one chunk and return self (implemented by subclasses)."""
+        raise NotImplementedError
+
+    def result(self):
+        """Return the metric over the chunks seen so far (implemented by subclasses)."""
+        raise NotImplementedError
+
+    def reset(self):
+        """Forget every chunk and return self (implemented by subclasses)."""
+        raise NotImplementedError
+
+
 class _ChunkWindow:
     """
     Running total of per-chunk arrays, optionally over the last `window` chunks only.
@@ -308,11 +333,13 @@ class _ChunkWindow:
         self.reset()
 
     def reset(self):
+        """Forget every chunk."""
         self.total = None
         self.parts = deque()
         self.n_chunks = 0
 
     def add(self, part):
+        """Add one chunk's array, dropping the oldest chunk once the window is full."""
         self.total = part.copy() if self.total is None else self.total + part
         self.n_chunks += 1
         if self.window is not None:
@@ -327,7 +354,7 @@ class _ChunkWindow:
             self.parts = deque(func(part) for part in self.parts)
 
 
-class StreamingConfusionMatrix:
+class StreamingConfusionMatrix(StreamingMetric):
     """
     Confusion matrix accumulated over chunks (rows = true, columns = predicted).
 
@@ -377,6 +404,7 @@ class StreamingConfusionMatrix:
             k = new_labels.size
 
             def grow(matrix):
+                """Embed the old k x k matrix in the larger one at the old labels' positions."""
                 bigger = np.zeros((k, k), dtype=matrix.dtype)
                 bigger[np.ix_(old_index, old_index)] = matrix
                 return bigger
@@ -430,10 +458,11 @@ class StreamingConfusionMatrix:
 
     @property
     def n_samples_(self):
+        """Samples counted so far (inside the window); 0 before any update."""
         return 0 if self._window.total is None else int(self._window.total.sum())
 
 
-class _StreamingLabelMetric:
+class _StreamingLabelMetric(StreamingMetric):
     """Shared code for metrics computed from a StreamingConfusionMatrix."""
 
     def __init__(self, labels=None, window=None):
@@ -475,6 +504,7 @@ class StreamingAccuracy(_StreamingLabelMetric):
     """
 
     def result(self):
+        """Accuracy so far (trace / total), a float in [0, 1]; RuntimeError before any update."""
         matrix = self.confusion.result()
         return _safe_ratio(np.trace(matrix), matrix.sum())
 
@@ -495,6 +525,7 @@ class StreamingPrecision(_StreamingLabelMetric):
         self.pos_label = pos_label
 
     def result(self):
+        """Precision so far, a float in [0, 1]; RuntimeError before any update."""
         tp, fp, _ = self._pos_counts(self.pos_label)
         return _safe_ratio(tp, tp + fp)
 
@@ -503,6 +534,7 @@ class StreamingRecall(StreamingPrecision):
     """Recall TP / (TP + FN) for pos_label over chunks; 0.0 if there are no real positives."""
 
     def result(self):
+        """Recall so far, a float in [0, 1]; RuntimeError before any update."""
         tp, _, fn = self._pos_counts(self.pos_label)
         return _safe_ratio(tp, tp + fn)
 
@@ -511,11 +543,12 @@ class StreamingF1(StreamingPrecision):
     """F1 = 2TP / (2TP + FP + FN) for pos_label over chunks; 0.0 if there are no positives."""
 
     def result(self):
+        """F1 so far, a float in [0, 1]; RuntimeError before any update."""
         tp, fp, fn = self._pos_counts(self.pos_label)
         return _safe_ratio(2 * tp, 2 * tp + fp + fn)
 
 
-class StreamingMSE:
+class StreamingMSE(StreamingMetric):
     """
     Mean squared error accumulated over chunks: a running sum of squared errors and a count.
 
@@ -545,13 +578,14 @@ class StreamingMSE:
         return self
 
     def result(self):
+        """Mean squared error so far (squared-error sum / count); RuntimeError before any update."""
         if self._window.total is None:
             raise RuntimeError("no data has been added yet; call update first")
         squared_sum, count = self._window.total
         return float(squared_sum / count) if count > 0 else 0.0
 
 
-class StreamingAUC:
+class StreamingAUC(StreamingMetric):
     """
     ROC AUC accumulated over chunks, from histograms of the scores.
 
@@ -616,6 +650,11 @@ class StreamingAUC:
         return self
 
     def result(self):
+        """
+        AUC so far, a float in [0, 1]; NaN while only one class has been seen.
+
+        Raises RuntimeError before any update.
+        """
         if self._window.total is None:
             raise RuntimeError("no data has been added yet; call update first")
         neg, pos = self._window.total

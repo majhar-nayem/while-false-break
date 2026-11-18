@@ -207,8 +207,9 @@ class SimpleImputer(Transformer):
         - most_frequent: running count of every value seen in each column
           (exact), merged with np.unique;
         - median: an exact median needs every value, so a stats.StreamingHistogram
-          per column (range from the first chunk) gives an approximate one, to
-          within one bin width. fit on a single array is still exact.
+          per column (its range widens as later chunks need it) gives an
+          approximate one, within one bin width of the middle data value (see
+          StreamingHistogram.quantile). fit on a single array is still exact.
 
     Complexity:
         O(n * d) per chunk for mean/constant, O(n * d * log n) for
@@ -249,9 +250,7 @@ class SimpleImputer(Transformer):
             self.value_counts_ = [(X[:0, j], np.zeros(0, dtype=int)) for j in range(X.shape[1])]
         for j, (old_values, old_counts) in enumerate(self.value_counts_):  # loop over columns
             present = X[~mask[:, j], j]
-            values, inverse = np.unique(
-                np.concatenate([old_values, present]), return_inverse=True
-            )
+            values, inverse = np.unique(np.concatenate([old_values, present]), return_inverse=True)
             weights = np.concatenate([old_counts, np.ones(present.size, dtype=int)])
             counts = np.bincount(inverse, weights=weights, minlength=values.size).astype(int)
             self.value_counts_[j] = (values, counts)
@@ -315,6 +314,10 @@ class SimpleImputer(Transformer):
         self._check_fitted()
         X, mask = self._prepare(X, self.n_features_in_)
         return np.where(mask, self.statistics_, X)
+
+
+# The Assignment 2.2 specification calls this class Imputer; both names work.
+Imputer = SimpleImputer
 
 
 class OneHotEncoder(Transformer):

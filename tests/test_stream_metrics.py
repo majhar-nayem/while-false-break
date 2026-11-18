@@ -43,8 +43,11 @@ def test_accumulated_metrics_equal_batch_metrics():
     assert _feed(StreamingAccuracy(), y_true, y_pred).result() == pytest.approx(
         accuracy(y_true, y_pred)
     )
-    for stream_cls, batch in ((StreamingPrecision, precision), (StreamingRecall, recall),
-                              (StreamingF1, f1)):
+    for stream_cls, batch in (
+        (StreamingPrecision, precision),
+        (StreamingRecall, recall),
+        (StreamingF1, f1),
+    ):
         streamed = _feed(stream_cls(pos_label=2), y_true, y_pred).result()
         assert streamed == pytest.approx(batch(y_true, y_pred, pos_label=2))
     y = rng.normal(size=100)
@@ -120,3 +123,31 @@ def test_streaming_auc_edge_cases():
         StreamingAUC().update([0, 1], [0.5, np.nan])
     with pytest.raises(TypeError):
         StreamingAUC().update([0, 1], ["a", "b"])
+
+
+def test_mse_and_auc_reset_window_and_parameters():
+    mse_metric = StreamingMSE(window=1)
+    with pytest.raises(RuntimeError):
+        mse_metric.result()
+    mse_metric.update([0.0, 0.0], [1.0, 1.0]).update([0.0], [3.0])
+    assert mse_metric.result() == 9.0  # only the last chunk counts
+    with pytest.raises(TypeError):
+        mse_metric.update(["a"], ["b"])
+    mse_metric.reset()
+    with pytest.raises(RuntimeError):
+        mse_metric.result()
+
+    auc_metric = StreamingAUC(window=1)
+    auc_metric.update([0, 1], [0.9, 0.1])  # perfectly wrong
+    auc_metric.update([0, 1], [0.1, 0.9])  # perfectly right; the first chunk drops out
+    assert auc_metric.result() == 1.0
+    assert StreamingAUC(range=(0, 10)).update([0, 1], [2.0, 8.0]).result() == 1.0
+    assert StreamingAUC().update([0, 1], [-5.0, 7.0]).result() == 1.0  # clipped into end bins
+    auc_metric.reset()
+    with pytest.raises(RuntimeError):
+        auc_metric.result()
+    with pytest.raises(RuntimeError):
+        auc_metric.roc_curve()
+    for bad in ({"bins": 0}, {"range": (1, 1)}, {"window": 0}):
+        with pytest.raises(ValueError):
+            StreamingAUC(**bad)

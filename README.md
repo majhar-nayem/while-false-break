@@ -76,8 +76,9 @@ while-false-break/
 │   ├── io.py                CSV reader with chunked streaming (iter_csv_chunks)
 │   └── ...                  sort_search, rank, optim, utils, benchmarking (from 2.1)
 ├── numcompute/              the group's Assignment 2.1 package (unchanged)
-├── tests/                   109 unit tests; the test_stream_*, test_tree and
-│                            test_visualise files hold the 40 streaming tests
+├── tests/                   126 unit tests; the test_stream_*, test_tree,
+│                            test_visualise and test_validation files hold
+│                            the 57 tests added for this assignment
 ├── demo/
 │   ├── stream_demo.ipynb    streaming demo on the Titanic dataset
 │   ├── figures/             charts saved by the demo
@@ -113,12 +114,14 @@ pipe.predict(X_new)                      # uses the most recently trained tree
 Score every chunk before training on it, and plot the results:
 
 ```python
+from numcompute_stream.metrics import StreamingF1
 from numcompute_stream.stream import StreamTrainer
 from numcompute_stream import visualise
 
-trainer = StreamTrainer(pipe, window=5, pos_label=1)
+trainer = StreamTrainer(pipe, window=5, pos_label=1, metrics={"f1": StreamingF1()})
 for X_chunk, y_chunk in stream:
     trainer.process_chunk(X_chunk, y_chunk)   # score_chunk, then fit_chunk
+trainer.history("f1")                         # any extra metric is logged by name
 
 visualise.plot_metric_over_time(
     trainer.history("cumulative_accuracy"), "Accuracy over time", "Accuracy",
@@ -134,7 +137,7 @@ from numcompute_stream import io
 from numcompute_stream.metrics import StreamingAccuracy, StreamingAUC
 from numcompute_stream.stats import StreamingStats
 
-stats = StreamingStats(bins=100)
+stats = StreamingStats()   # 256 bins per column; the range widens as needed
 for chunk in io.iter_csv_chunks("demo/data/train.csv", chunksize=100, usecols=["Age", "Fare"]):
     stats.update_stats(chunk)
 stats.mean, stats.std(), stats.quantile([0.25, 0.5, 0.75])
@@ -151,16 +154,16 @@ New modules:
 | Module | Main contents |
 |---|---|
 | `tree` | `DecisionTreeClassifier(max_depth, min_samples_split, max_features, criterion, min_impurity_decrease, buffer_size, random_state)` with `fit`, `partial_fit`, `flush`, `predict`, `predict_proba`, `apply`, `score`; `best_split` (vectorised) and `best_split_loop` |
-| `stream` | `StreamTrainer(model, window, pos_label)` with `score_chunk`, `fit_chunk`, `process_chunk`, `run`, `history`, `log_`; `memory_footprint` |
+| `stream` | `StreamTrainer(model, window, pos_label, metrics)` with `score_chunk`, `fit_chunk`, `process_chunk`, `run`, `history`, `log_`; `metrics` logs any extra streaming metric by name; `memory_footprint` |
 | `visualise` | `plot_metric_over_time`, `compare_models`, `plot_predictions_vs_ground_truth`; each takes `ax`, `save_path`, `show` and returns `(fig, ax)` |
 
 Streaming additions to the 2.1 modules:
 
 | Module | Streaming API |
 |---|---|
-| `preprocessing` | `partial_fit` on `StandardScaler`, `MinMaxScaler`, `SimpleImputer`, `OneHotEncoder` (new `categories=` to fix the output width) |
-| `stats` | `StreamingStats.update_stats(X_chunk)` (count, mean, var, std, min, max, quantile, median, histogram); `StreamingHistogram(bins, range, window)` |
-| `metrics` | `StreamingConfusionMatrix`, `StreamingAccuracy`, `StreamingPrecision`, `StreamingRecall`, `StreamingF1`, `StreamingMSE`, `StreamingAUC`, all with `update`, `result`, `reset` and an optional rolling `window` |
+| `preprocessing` | `partial_fit` on `StandardScaler`, `MinMaxScaler`, `SimpleImputer` (also importable as `Imputer`), `OneHotEncoder` (new `categories=` to fix the output width) |
+| `stats` | `StreamingStats(bins, range, window, axis).update_stats(X_chunk)` (count, mean, var, std, min, max, quantile, median, histogram), per column (`axis=0`) or pooled (`axis=None`); `StreamingHistogram(bins, range, window)`, whose range widens automatically |
+| `metrics` | `StreamingConfusionMatrix`, `StreamingAccuracy`, `StreamingPrecision`, `StreamingRecall`, `StreamingF1`, `StreamingMSE`, `StreamingAUC`, all implementing the `StreamingMetric` interface (`update`, `result`, `reset`) with an optional rolling `window` |
 | `pipeline` | `Pipeline.partial_fit`, `Pipeline.predict_proba`, `FeatureUnion.partial_fit`, `ColumnSelector.partial_fit` |
 
 Shapes follow one rule throughout: `X` is `(n_samples, n_features)`, labels are
@@ -195,7 +198,13 @@ merged chunk by chunk with Chan et al.'s parallel formula, so they equal the
 batch result to rounding error and avoid the cancellation of
 `sum(x²) − n·mean²`. Quantiles, the imputer's streaming median and the
 streaming AUC would need every past value to be exact, so they are read from
-fixed-bin histograms instead; each docstring states the error bound.
+equal-width histograms instead; each docstring states the error bound. The
+histogram's range starts at the first chunk's min and max and doubles
+(merging neighbouring bins) whenever a later value falls outside it, so no
+value is ever lost. A quantile estimate is always within one bin width of
+the data value at that rank; `np.quantile` interpolates between neighbouring
+values, so the two can differ by more when there are only a few, widely
+spaced values.
 
 **Numerical safety.** NaN is ignored column by column in statistics and
 scalers, constant columns are scaled by 1 instead of dividing by zero, empty
@@ -213,8 +222,8 @@ test set.
 python -m pytest
 ```
 
-109 tests pass, and line coverage of `numcompute_stream` is 96%. The 40
-streaming tests cover:
+126 tests pass, and line coverage of `numcompute_stream` is 100%. The 57 tests
+added for this assignment cover:
 
 - **Batch equivalence:** streamed scalers, statistics and metrics equal their
   batch versions on the joined data, across uneven chunk sizes.
@@ -225,7 +234,9 @@ streaming tests cover:
   empties, and `predict` uses the last tree in between.
 - **Edge cases:** all-NaN columns, zero-variance chunks, empty chunks, a class
   or category first seen in a later chunk, unknown labels, rolling windows,
-  `predict` before the first retrain, and mismatched shapes.
+  `predict` before the first retrain, non-contiguous (strided) chunks, values
+  outside the histogram's first range, and mismatched shapes.
+- **Input checks:** every error branch, in `tests/test_validation.py`.
 
 ## Performance
 

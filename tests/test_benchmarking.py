@@ -1,4 +1,7 @@
-"""Tests for numcompute_stream.benchmarking. Run with:  python -m pytest tests/test_benchmarking.py"""
+"""Tests for numcompute_stream.benchmarking.
+
+Run with:  python -m pytest tests/test_benchmarking.py
+"""
 
 import numpy as np
 import pytest

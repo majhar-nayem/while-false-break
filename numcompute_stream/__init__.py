@@ -1,4 +1,4 @@
-"""NumCompute Stream: a streaming decision-tree toolkit built on plain Python, NumPy and matplotlib."""
+"""NumCompute Stream: a streaming decision-tree toolkit built on Python, NumPy and matplotlib."""
 
 from numcompute_stream import (
     benchmarking,

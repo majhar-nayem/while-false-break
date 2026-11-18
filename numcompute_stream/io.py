@@ -83,7 +83,7 @@ def _first_bad_cell(text):
             float(text[row, col])
         except ValueError:
             return row, col, text[row, col]
-    return None
+    return None  # pragma: no cover - only called after astype(float) found a bad cell
 
 
 def _text_to_float(text, is_missing, cols):

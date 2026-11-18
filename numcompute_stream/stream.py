@@ -68,6 +68,18 @@ def _final_estimator(model):
     return steps[-1][1] if steps else model
 
 
+def _is_trained(model):
+    """
+    Whether the model can predict yet.
+
+    Buffered models (anything with n_retrains_, such as DecisionTreeClassifier)
+    are ready after their first retrain. Other models are assumed ready, so an
+    error from their predict is raised, not hidden.
+    """
+    n_retrains = getattr(_final_estimator(model), "n_retrains_", None)
+    return n_retrains is None or n_retrains > 0
+
+
 class StreamTrainer:
     """
     Manage a streaming model: score each chunk, train on it, and log the results.
@@ -78,9 +90,14 @@ class StreamTrainer:
         window : int >= 1 or None, number of chunks for rolling_accuracy
         pos_label : label of the positive class. If given and the model has
             predict_proba, the cumulative ROC AUC of that class is logged.
+        metrics : dict {name: metric}, optional, extra streaming metrics to
+            log (any metrics.StreamingMetric that takes predictions, e.g.
+            {"f1": StreamingF1(), "recent_recall": StreamingRecall(window=5)}).
+            Each is updated with every scored chunk and logged under its name.
 
     Attributes:
-        log_ : list of dicts, one per processed chunk, with the keys in LOG_KEYS:
+        log_ : list of dicts, one per processed chunk, with the keys in
+            LOG_KEYS followed by the names in metrics:
             chunk, n_samples : chunk index and size
             accuracy : accuracy on this chunk before training on it
                 (None while the model has not been trained yet)
@@ -92,24 +109,37 @@ class StreamTrainer:
             memory_bytes : memory_footprint(model) after training
 
     Raises:
-        TypeError if the model has no partial_fit or predict method.
+        TypeError if the model has no partial_fit or predict method, or a
+            metric has no update, result or reset method.
+        ValueError if a metric name clashes with a built-in log key.
 
     Complexity:
-        the model's own costs, plus O(n) per chunk for the metrics.
+        the model's own costs, plus O(n) per chunk for each metric.
     """
 
-    def __init__(self, model, window=None, pos_label=None):
+    def __init__(self, model, window=None, pos_label=None, metrics=None):
         for method in ("partial_fit", "predict"):
             if not hasattr(model, method):
                 raise TypeError(f"model has no {method} method")
+        metrics = dict(metrics or {})
+        for name, metric in metrics.items():
+            if name in LOG_KEYS:
+                raise ValueError(f"metric name {name!r} clashes with a built-in log key")
+            for method in ("update", "result", "reset"):
+                if not hasattr(metric, method):
+                    raise TypeError(f"metric {name!r} has no {method} method")
         self.model = model
         self.window = window
         self.pos_label = pos_label
+        self.metrics = metrics
+        self.keys = LOG_KEYS + tuple(metrics)
         self.reset()
 
     def reset(self):
         """Clear the log and the metrics (the model is not changed). Returns self."""
         self.log_ = []
+        for metric in self.metrics.values():
+            metric.reset()
         self._cumulative = StreamingAccuracy()
         self._rolling = StreamingAccuracy(window=self.window) if self.window else None
         self._auc = StreamingAUC(pos_label=self.pos_label) if self.pos_label is not None else None
@@ -126,24 +156,20 @@ class StreamTrainer:
 
         Returns:
             dict with accuracy, cumulative_accuracy, rolling_accuracy,
-            cumulative_auc and predict_time; the metric values are None while
-            the model has not been trained yet. The chunk is not trained on.
+            cumulative_auc, one entry per extra metric, and predict_time; the
+            metric values are None while the model has not been trained yet.
+            The chunk is not trained on.
+
+        Raises:
+            any error from the model's predict once it has been trained
+            (errors are not hidden as "not scored").
         """
         y = np.asarray(y)
         start = time.perf_counter()
-        try:
-            y_pred = self.model.predict(X)
-        except RuntimeError:  # not trained yet: nothing to score
-            y_pred = None
+        y_pred = self.model.predict(X) if _is_trained(self.model) else None
         predict_time = time.perf_counter() - start
 
-        scores = {
-            "accuracy": None,
-            "cumulative_accuracy": None,
-            "rolling_accuracy": None,
-            "cumulative_auc": None,
-            "predict_time": predict_time,
-        }
+        scores = self._empty_scores(predict_time)
         if y_pred is not None and y.size > 0:
             scores["accuracy"] = float(np.mean(y_pred == y))
             scores["cumulative_accuracy"] = self._cumulative.update(y, y_pred).result()
@@ -151,8 +177,17 @@ class StreamTrainer:
                 scores["rolling_accuracy"] = self._rolling.update(y, y_pred).result()
             if self._auc is not None and hasattr(self.model, "predict_proba"):
                 scores["cumulative_auc"] = self._auc_update(X, y)
+            for name, metric in self.metrics.items():
+                scores[name] = metric.update(y, y_pred).result()
         self._pending = scores
         return dict(scores)
+
+    def _empty_scores(self, predict_time=0.0):
+        """Score fields of a chunk that was not scored (all None)."""
+        names = ("accuracy", "cumulative_accuracy", "rolling_accuracy", "cumulative_auc")
+        scores = dict.fromkeys(names + tuple(self.metrics))
+        scores["predict_time"] = predict_time
+        return scores
 
     def _auc_update(self, X, y):
         """Add the positive-class probabilities of this chunk to the running AUC."""
@@ -180,13 +215,7 @@ class StreamTrainer:
         fit_time = time.perf_counter() - start
         retrains_after = getattr(estimator, "n_retrains_", None)
 
-        scores = self._pending or {
-            "accuracy": None,
-            "cumulative_accuracy": None,
-            "rolling_accuracy": None,
-            "cumulative_auc": None,
-            "predict_time": 0.0,
-        }
+        scores = self._pending or self._empty_scores()
         self._pending = None
         record = {
             "chunk": len(self.log_),
@@ -198,11 +227,11 @@ class StreamTrainer:
             "fit_time": fit_time,
             "memory_bytes": memory_footprint(self.model),
         }
-        self.log_.append({key: record[key] for key in LOG_KEYS})
+        self.log_.append({key: record[key] for key in self.keys})
         return self.log_[-1]
 
     def process_chunk(self, X, y):
-        """Test-then-train on one chunk: score_chunk(X, y), then fit_chunk(X, y). Returns the record."""
+        """Test-then-train on one chunk: score_chunk, then fit_chunk. Returns the log record."""
         self.score_chunk(X, y)
         return self.fit_chunk(X, y)
 
@@ -228,9 +257,9 @@ class StreamTrainer:
         One logged value per chunk as a float array (None becomes NaN), ready to plot.
 
         Raises:
-            KeyError if key is not one of LOG_KEYS.
+            KeyError if key is not one of LOG_KEYS or a metric name.
         """
-        if key not in LOG_KEYS:
-            raise KeyError(f"unknown log key {key!r}; choose from {LOG_KEYS}")
+        if key not in self.keys:
+            raise KeyError(f"unknown log key {key!r}; choose from {self.keys}")
         values = [record[key] for record in self.log_]
         return np.array([np.nan if v is None else v for v in values], dtype=float)

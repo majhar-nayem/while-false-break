@@ -227,7 +227,8 @@ class DecisionTreeClassifier(Estimator):
         buffer_size=500,
         random_state=None,
     ):
-        if max_depth is not None and (not isinstance(max_depth, (int, np.integer)) or max_depth < 1):
+        valid_depth = isinstance(max_depth, (int, np.integer)) and max_depth >= 1
+        if max_depth is not None and not valid_depth:
             raise ValueError(f"max_depth must be a positive int or None, got {max_depth!r}")
         if not isinstance(min_samples_split, (int, np.integer)) or min_samples_split < 2:
             raise ValueError(f"min_samples_split must be an int >= 2, got {min_samples_split!r}")
@@ -301,6 +302,31 @@ class DecisionTreeClassifier(Estimator):
             raise ValueError(f"max_features={m} is more than the {d} features")
         return m
 
+    def _choose_columns(self, rng, d, n_try):
+        """Columns to search at one node: all d, or a sorted random subset of n_try."""
+        if n_try < d:
+            return np.sort(rng.choice(d, size=n_try, replace=False))
+        return np.arange(d)
+
+    def _node_split(self, X, y_codes, rows, counts, n_classes, columns):
+        """
+        Best split of one node, or None if the node should stay a leaf.
+
+        Returns:
+            (column, threshold), with column an index into X; None if every
+            searched column is constant or the impurity decrease is below
+            min_impurity_decrease.
+        """
+        best, threshold, child_impurity = self._split(
+            X[np.ix_(rows, columns)], y_codes[rows], n_classes, self.criterion
+        )
+        if best < 0:
+            return None
+        gain = float(_impurity(counts, rows.size, self.criterion)) - child_impurity
+        if gain < self.min_impurity_decrease - GAIN_TOLERANCE:
+            return None
+        return int(columns[best]), threshold
+
     def _build(self, X, y, classes):
         """Train a new tree on (X, y) from scratch, replacing the old one."""
         y_codes = np.searchsorted(classes, y)
@@ -309,46 +335,38 @@ class DecisionTreeClassifier(Estimator):
         n_try = self._n_features_to_try(d)
         rng = np.random.default_rng(self.random_state)
         max_depth = np.inf if self.max_depth is None else self.max_depth
-
         feature, threshold, left, right, value = [], [], [], [], []
+
+        def add_leaf(rows):
+            """Append a leaf holding these sample rows and return its node id."""
+            feature.append(-1)
+            threshold.append(np.nan)
+            left.append(-1)
+            right.append(-1)
+            value.append(np.bincount(y_codes[rows], minlength=k))
+            return len(feature) - 1
+
+        all_rows = np.arange(n)
+        stack = [(add_leaf(all_rows), all_rows, 0)]  # (node id, sample rows, depth)
         depth_reached = 0
-        stack = [(0, np.arange(n), 0)]  # (node id, sample rows, depth)
-        feature.append(-1)
-        threshold.append(np.nan)
-        left.append(-1)
-        right.append(-1)
-        value.append(np.bincount(y_codes, minlength=k))
         while stack:  # one iteration per node: a loop over nodes is needed
             node, rows, depth = stack.pop()
             depth_reached = max(depth_reached, depth)
             counts = value[node]
-            if depth >= max_depth or rows.size < self.min_samples_split or counts.max() == rows.size:
+            too_deep = depth >= max_depth
+            too_small = rows.size < self.min_samples_split
+            if too_deep or too_small or counts.max() == rows.size:  # last test: pure node
                 continue
-            if n_try < d:
-                columns = np.sort(rng.choice(d, size=n_try, replace=False))
-            else:
-                columns = np.arange(d)
-            best_column, best_threshold, child_impurity = self._split(
-                X[np.ix_(rows, columns)], y_codes[rows], k, self.criterion
-            )
-            if best_column < 0:
-                continue  # every column is constant here
-            gain = float(_impurity(counts, rows.size, self.criterion)) - child_impurity
-            if gain < self.min_impurity_decrease - GAIN_TOLERANCE:
+            columns = self._choose_columns(rng, d, n_try)
+            split = self._node_split(X, y_codes, rows, counts, k, columns)
+            if split is None:
                 continue
-
-            go_left = X[rows, columns[best_column]] <= best_threshold
-            for child_rows in (rows[go_left], rows[~go_left]):
-                feature.append(-1)
-                threshold.append(np.nan)
-                left.append(-1)
-                right.append(-1)
-                value.append(np.bincount(y_codes[child_rows], minlength=k))
-                stack.append((len(feature) - 1, child_rows, depth + 1))
-            feature[node] = int(columns[best_column])
-            threshold[node] = best_threshold
-            left[node] = len(feature) - 2
-            right[node] = len(feature) - 1
+            feature[node], threshold[node] = split
+            go_left = X[rows, feature[node]] <= threshold[node]
+            left[node] = add_leaf(rows[go_left])
+            right[node] = add_leaf(rows[~go_left])
+            stack.append((left[node], rows[go_left], depth + 1))
+            stack.append((right[node], rows[~go_left], depth + 1))
 
         self.feature_ = np.array(feature, dtype=int)
         self.threshold_ = np.array(threshold, dtype=float)
@@ -376,6 +394,7 @@ class DecisionTreeClassifier(Estimator):
         return self
 
     def _clear_buffer(self):
+        """Empty the buffer of waiting chunks."""
         self._buffer_X = []
         self._buffer_y = []
         self._n_buffered = 0
@@ -411,12 +430,13 @@ class DecisionTreeClassifier(Estimator):
         return self
 
     def flush(self):
-        """Retrain on the samples left in the buffer (if any), e.g. at the end of a stream. Returns self."""
+        """Train on the samples left in the buffer, e.g. at the end of a stream. Returns self."""
         if self._n_buffered > 0:
             self._retrain_on_buffer()
         return self
 
     def _retrain_on_buffer(self):
+        """Train a new tree on every buffered sample, then empty the buffer."""
         X = np.concatenate(self._buffer_X)
         y = np.concatenate(self._buffer_y)
         self._clear_buffer()
@@ -429,11 +449,13 @@ class DecisionTreeClassifier(Estimator):
 
     @property
     def n_nodes_(self):
+        """Number of nodes (inner nodes and leaves) in the trained tree."""
         self._check_trained()
         return self.feature_.size
 
     @property
     def n_leaves_(self):
+        """Number of leaves in the trained tree."""
         self._check_trained()
         return int(np.sum(self.feature_ < 0))
 
@@ -449,6 +471,7 @@ class DecisionTreeClassifier(Estimator):
     # ----- prediction ---------------------------------------------------
 
     def _check_trained(self):
+        """Raise RuntimeError if no tree has been trained yet."""
         if not hasattr(self, "feature_"):
             raise RuntimeError(
                 "the tree has not been trained yet: call fit, or keep calling partial_fit "
@@ -502,5 +525,6 @@ def _check_max_features(max_features):
     )
     if not valid:
         raise ValueError(
-            f"max_features must be None, 'sqrt', 'log2', an int >= 1 or a float in (0, 1], got {m!r}"
+            "max_features must be None, 'sqrt', 'log2', an int >= 1 or a float in (0, 1], "
+            f"got {m!r}"
         )

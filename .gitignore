@@ -11,3 +11,7 @@ venv/
 htmlcov/
 .ipynb_checkpoints/
 .DS_Store
+
+# Submitted separately, not part of the repository
+report/
+demo/VIDEO_SCRIPT.pdf

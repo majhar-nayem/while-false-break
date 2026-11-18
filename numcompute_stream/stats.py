@@ -433,11 +433,18 @@ class StreamingHistogram:
     Equal-width histogram of each column, updated chunk by chunk.
 
     Parameters:
-        bins : int >= 1, number of bins per column
-        range : (low, high), optional, the same for every column. Default: the
-            min and max of each column in the first chunk. Later values outside
-            the range are not binned but counted in n_below / n_above, so the
-            totals stay right; pass a range when the spread is known in advance.
+        bins : int >= 1, number of bins per column (even when range is None).
+            The default is generous because, after the range doubles, up to
+            half of the bins can lie outside the data.
+        range : (low, high) or None.
+            None (default): each column's range starts at the min and max of
+            the first chunk and doubles whenever a later finite value falls
+            outside it. Doubling merges neighbouring pairs of bins, so the bins
+            stay equal width, every finite value is binned, and no value is
+            ever lost. This needs an even number of bins.
+            (low, high): a fixed range for every column; values outside it are
+            not binned but counted in n_below / n_above.
+            Infinite values are always counted in n_below / n_above.
         window : int >= 1 or None. If set, only the last `window` chunks are
             counted (a sliding window); older chunks are dropped.
 
@@ -445,6 +452,7 @@ class StreamingHistogram:
         counts : ndarray of int, shape (d, bins)
         edges : ndarray, shape (d, bins + 1)
         n_below, n_above : ndarray of int, shape (d,), values outside the range
+            (only infinite values when the range adapts)
         count : ndarray of int, shape (d,), non-NaN values counted
 
     Raises:
@@ -458,18 +466,23 @@ class StreamingHistogram:
         division, floor((x - low) / width), for every value of every column at
         once; np.bincount on column * bins + bin counts them all in one call.
         NaN is ignored. The window keeps one small (d, bins) count array per
-        chunk and subtracts the oldest one when it falls out.
+        chunk and subtracts the oldest one when it falls out. When the range
+        doubles, the stored chunk counts are merged in the same way, so the
+        window stays consistent.
 
     Complexity:
-        O(n * d + d * bins) time per update, O(window * d * bins) memory
-        (O(d * bins) without a window).
+        O(n * d + d * bins) time per update, plus O(bins * window) for each
+        doubling (at most log2(new spread / old spread) per column);
+        O(window * d * bins) memory (O(d * bins) without a window).
     """
 
-    def __init__(self, bins=50, range=None, window=None):
+    def __init__(self, bins=256, range=None, window=None):
         if not isinstance(bins, (int, np.integer)) or bins < 1:
             raise ValueError(f"bins must be a positive int, got {bins!r}")
         if range is not None and not float(range[0]) < float(range[1]):
             raise ValueError(f"range must have low < high, got {range}")
+        if range is None and bins % 2:
+            raise ValueError(f"bins must be even when the range adapts (range=None), got {bins}")
         if window is not None and (not isinstance(window, (int, np.integer)) or window < 1):
             raise ValueError(f"window must be a positive int or None, got {window!r}")
         self.bins = int(bins)
@@ -502,7 +515,9 @@ class StreamingHistogram:
             high = np.where(any_value, high, 1.0)
             constant = low == high  # all values equal: a range of width 1 around them
             self._low = np.where(constant, low - 0.5, low)
-            self._high = np.where(constant, high + 0.5, high)
+            # Start just above the max, so the max sits inside a [left, right) bin
+            # and stays in the right bin when the range later doubles.
+            self._high = np.nextafter(np.where(constant, high + 0.5, high), np.inf)
         self._counts = np.zeros((d, self.bins), dtype=int)
         self._below = np.zeros(d, dtype=int)
         self._above = np.zeros(d, dtype=int)
@@ -516,13 +531,21 @@ class StreamingHistogram:
 
         Returns:
             self
+
+        Notes:
+            A chunk with no rows is ignored (it does not set the range or
+            count towards the window).
         """
         X = _as_columns(X_chunk, "X_chunk")
+        if X.shape[0] == 0:
+            return self
         if self._low is None:
             self._set_range(X)
         d = self._low.size
         if X.shape[1] != d:
             raise ValueError(f"expected {d} columns, got {X.shape[1]}")
+        if self.range is None:
+            self._widen(X)
 
         valid = ~np.isnan(X)
         below = (X < self._low) & valid
@@ -532,7 +555,8 @@ class StreamingHistogram:
         width = (self._high - self._low) / self.bins
         with np.errstate(invalid="ignore"):
             bin_index = np.floor((X - self._low) / width)
-        bin_index = np.clip(np.nan_to_num(bin_index), 0, self.bins - 1).astype(int)  # x == high -> last bin
+        # x == high lands one past the end: clip it into the last bin.
+        bin_index = np.clip(np.nan_to_num(bin_index), 0, self.bins - 1).astype(int)
         column = np.broadcast_to(np.arange(d), X.shape)
         flat = column[inside] * self.bins + bin_index[inside]
         counts = np.bincount(flat, minlength=d * self.bins).reshape(d, self.bins)
@@ -550,6 +574,41 @@ class StreamingHistogram:
                 self._below -= old_below
                 self._above -= old_above
         return self
+
+    def _widen(self, X):
+        """Double each column's range until it covers this chunk's finite values."""
+        finite = np.isfinite(X)
+        chunk_low = np.where(finite, X, np.inf).min(axis=0)
+        chunk_high = np.where(finite, X, -np.inf).max(axis=0)
+        outside = (chunk_low < self._low) | (chunk_high > self._high)
+        for j in np.flatnonzero(outside):  # only the columns that need it, usually none
+            while chunk_low[j] < self._low[j] or chunk_high[j] > self._high[j]:
+                width = self._high[j] - self._low[j]
+                grow_left = chunk_low[j] < self._low[j]
+                if grow_left:
+                    self._low[j] -= width
+                else:
+                    self._high[j] += width
+                self._merge_bins(j, grow_left)
+
+    def _merge_bins(self, j, grow_left):
+        """
+        Re-bin column j after its range doubled.
+
+        Each new bin covers two old ones, so neighbouring pairs of old counts
+        are summed into one half of the bins and the other half (the new
+        part of the range) starts empty. Stored window chunks are re-binned too.
+        """
+        half = self.bins // 2
+
+        def merged(row):
+            pairs = row.reshape(half, 2).sum(axis=1)
+            empty = np.zeros(half, dtype=row.dtype)
+            return np.concatenate([empty, pairs] if grow_left else [pairs, empty])
+
+        self._counts[j] = merged(self._counts[j])
+        for counts, _, _ in self._chunks:
+            counts[j] = merged(counts[j])
 
     def _check_updated(self):
         """Raise RuntimeError if no chunk has been added yet."""
@@ -603,10 +662,15 @@ class StreamingHistogram:
 
         Notes:
             The q * count-th value is found in the cumulative counts, and
-            values inside its bin are assumed to be spread evenly, so the
-            error is at most one bin width. A quantile that falls among the
-            values below (or above) the range is reported as the range's low
-            (or high) edge.
+            values inside its bin are assumed to be spread evenly. The
+            estimate is always in the same bin as the ceil(q * count)-th
+            smallest value, so it is within one bin width of that value.
+            np.quantile interpolates between neighbouring values instead, so
+            the two agree to about a bin width when the data is dense, but
+            can differ by more when there are only a few values with gaps
+            wider than a bin. q = 0 gives the left edge of the first bin that
+            holds a value. A quantile that falls among the values below (or
+            above) the range is reported as the range's low (or high) edge.
 
         Complexity:
             O(len(q) * d * bins) time and space.
@@ -621,8 +685,11 @@ class StreamingHistogram:
         cum_end = self._below[:, None] + np.cumsum(self._counts, axis=1)  # (d, bins)
         cum_start = cum_end - self._counts
 
-        # Bin holding the target: the number of bins that end before it.
-        j = (cum_end < target[..., None]).sum(axis=-1)  # (..., d), bins means "above the range"
+        # Bin holding the target: the number of bins that end before it. Empty
+        # bins before the first value are always skipped, so q = 0 (target 0)
+        # lands in the first bin that holds a value, not at the range's edge.
+        ends_before = (cum_end < target[..., None]) | (cum_end == 0)
+        j = ends_before.sum(axis=-1)  # (..., d), bins means "above the range"
         j_safe = np.minimum(j, self.bins - 1)
         columns = np.arange(total.size)
         in_bin = self._counts[columns, j_safe]
@@ -633,7 +700,8 @@ class StreamingHistogram:
         width = (self._high - self._low) / self.bins
         value = self._low + (j_safe + fraction) * width
 
-        value = np.where(target <= self._below, self._low, value)
+        among_below = (self._below > 0) & (target <= self._below)
+        value = np.where(among_below, self._low, value)
         value = np.where(j >= self.bins, self._high, value)
         return np.where(total > 0, value, np.nan)
 
@@ -644,7 +712,7 @@ class StreamingStats:
     histogram and quantiles, all updated with one call per chunk.
 
     Example:
-        stats = StreamingStats(bins=100)
+        stats = StreamingStats()
         for chunk in io.iter_csv_chunks(path, chunksize=200, usecols=[5, 9]):
             stats.update_stats(chunk)
         stats.mean, stats.std(), stats.quantile([0.25, 0.5, 0.75])
@@ -653,26 +721,42 @@ class StreamingStats:
         bins, range, window : passed to StreamingHistogram. The window only
             applies to the histogram and quantiles; count, mean, variance,
             min and max always cover the whole stream.
+        axis : 0 (default) or None, with the batch functions' meaning. Rows
+            always arrive in chunks, so axis=0 summarises each column and
+            returns arrays of shape (d,) (quantiles: q.shape + (d,)); axis=None
+            pools every value of every column and returns plain floats
+            (quantiles: q.shape).
 
     Raises:
         TypeError if a chunk is not numeric.
-        ValueError if a chunk has a different number of columns.
+        ValueError if axis is not 0 or None, or a chunk has a different
+            number of columns.
         RuntimeError if results are read before the first update.
 
     Notes:
         Mean and variance are exact (RunningStats merges each chunk's own
         mean and M2 with Chan et al.'s formula, which stays accurate where
-        sum(x^2) - n * mean^2 would cancel). Quantiles are approximate, to
-        within one bin width, because exact quantiles would need every value.
+        sum(x^2) - n * mean^2 would cancel). Quantiles are approximate, because
+        exact ones would need every value: each is within one bin width of
+        the data value at that rank (see StreamingHistogram.quantile).
         NaN is ignored column by column; a column with no values gives NaN.
 
     Complexity:
         O(n * d + d * bins) time per chunk, O(d * bins) memory (times window).
     """
 
-    def __init__(self, bins=50, range=None, window=None):
+    def __init__(self, bins=256, range=None, window=None, axis=0):
+        if axis not in (0, None):
+            raise ValueError(f"axis must be 0 (per column) or None (all values), got {axis!r}")
+        self.axis = axis
         self._histogram = StreamingHistogram(bins=bins, range=range, window=window)
         self.reset()
+
+    def _out(self, values):
+        """Per-column results as they are for axis=0; the single pooled value for axis=None."""
+        if self.axis is None:
+            return values[0].item() if np.ndim(values) == 1 else values[..., 0]
+        return values
 
     def reset(self):
         """Forget all data. Returns self."""
@@ -692,8 +776,15 @@ class StreamingStats:
 
         Returns:
             self
+
+        Notes:
+            A chunk with no rows is ignored.
         """
         X = _as_columns(X_chunk, "X_chunk")
+        if X.shape[0] == 0:
+            return self
+        if self.axis is None:
+            X = X.reshape(-1, 1)  # pool every value into one column
         if self._min is not None and X.shape[1] != self._min.size:
             raise ValueError(f"expected {self._min.size} columns, got {X.shape[1]}")
         self._moments.update(X)
@@ -718,45 +809,51 @@ class StreamingStats:
     def count(self):
         """Non-NaN values seen per column, shape (d,)."""
         self._check_updated()
-        return self._moments.count.copy()
+        return self._out(self._moments.count.copy())
 
     @property
     def mean(self):
         """Mean per column, shape (d,)."""
         self._check_updated()
-        return self._moments.mean
+        return self._out(self._moments.mean)
 
     def var(self, ddof=0):
         """Variance per column, shape (d,); NaN where count <= ddof."""
         self._check_updated()
-        return self._moments.var(ddof)
+        return self._out(self._moments.var(ddof))
 
     def std(self, ddof=0):
-        """Standard deviation per column, shape (d,)."""
-        return np.sqrt(self.var(ddof))
+        """Standard deviation per column, shape (d,) (a float for axis=None)."""
+        value = np.sqrt(self.var(ddof))
+        return float(value) if self.axis is None else value
 
     @property
     def min(self):
         """Minimum per column, shape (d,); NaN for a column with no values."""
         self._check_updated()
-        return np.where(np.isinf(self._min) & (self._min > 0), np.nan, self._min)
+        return self._out(np.where(np.isinf(self._min) & (self._min > 0), np.nan, self._min))
 
     @property
     def max(self):
         """Maximum per column, shape (d,); NaN for a column with no values."""
         self._check_updated()
-        return np.where(np.isinf(self._max) & (self._max < 0), np.nan, self._max)
+        return self._out(np.where(np.isinf(self._max) & (self._max < 0), np.nan, self._max))
 
     def quantile(self, q):
         """Approximate quantiles per column (see StreamingHistogram.quantile)."""
         self._check_updated()
-        return self._histogram.quantile(q)
+        return self._out(self._histogram.quantile(q))
 
     def median(self):
         """Approximate median per column, shape (d,)."""
         return self.quantile(0.5)
 
     def histogram(self):
-        """Return (counts, edges) with shapes (d, bins) and (d, bins + 1)."""
+        """
+        Return (counts, edges), shapes (d, bins) and (d, bins + 1).
+
+        For axis=None the shapes are (bins,) and (bins + 1,).
+        """
         self._check_updated()
-        return self._histogram.counts, self._histogram.edges
+        counts, edges = self._histogram.counts, self._histogram.edges
+        return (counts[0], edges[0]) if self.axis is None else (counts, edges)

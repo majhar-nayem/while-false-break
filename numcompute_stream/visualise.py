@@ -195,8 +195,14 @@ def plot_predictions_vs_ground_truth(
         ax.imshow(matrix, cmap="Blues")
         high = matrix.max() / 2 if matrix.max() > 0 else 1
         for (i, j), count in np.ndenumerate(matrix):
-            ax.text(j, i, str(count), ha="center", va="center",
-                    color="white" if count > high else "black")
+            ax.text(
+                j,
+                i,
+                str(count),
+                ha="center",
+                va="center",
+                color="white" if count > high else "black",
+            )
         ticks = np.arange(len(labels))
         ax.set_xticks(ticks, [str(label) for label in labels])
         ax.set_yticks(ticks, [str(label) for label in labels])

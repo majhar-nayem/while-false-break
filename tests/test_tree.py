@@ -138,10 +138,46 @@ def test_input_and_parameter_errors():
         tree.predict(np.ones((1, 3)))  # wrong number of columns
     with pytest.raises(ValueError):
         tree.partial_fit(np.ones((2, 5)), [0, 1])
-    for bad in ({"max_depth": 0}, {"min_samples_split": 1}, {"criterion": "mse"},
-                {"buffer_size": 0}, {"max_features": 0}, {"max_features": 1.5}):
+    for bad in (
+        {"max_depth": 0},
+        {"min_samples_split": 1},
+        {"criterion": "mse"},
+        {"buffer_size": 0},
+        {"max_features": 0},
+        {"max_features": 1.5},
+    ):
         with pytest.raises(ValueError):
             DecisionTreeClassifier(**bad)
     sampled = DecisionTreeClassifier(max_features="sqrt", random_state=0).fit(*_linear_data())
     again = DecisionTreeClassifier(max_features="sqrt", random_state=0).fit(*_linear_data())
     assert np.array_equal(sampled.feature_, again.feature_)  # same seed, same tree
+
+
+def test_max_features_options_and_impurity_threshold():
+    X, y = _linear_data(200)
+    for option, n_tried in (("log2", 2), (0.5, 2), (3, 3), ("sqrt", 2)):
+        tree = DecisionTreeClassifier(max_features=option, random_state=1)
+        assert tree._n_features_to_try(4) == n_tried
+        assert tree.fit(X, y).score(X, y) > 0.8
+    with pytest.raises(ValueError, match="more than"):
+        DecisionTreeClassifier(max_features=9).fit(X, y)  # only 4 features
+    # XOR's first split has zero gain, so any positive threshold stops at the root.
+    assert (
+        DecisionTreeClassifier(max_depth=2, min_impurity_decrease=0.01).fit(XOR_X, XOR_y).n_nodes_
+        == 1
+    )
+    with pytest.raises(ValueError):
+        DecisionTreeClassifier(min_impurity_decrease=-0.1)
+
+
+def test_label_nan_empty_chunk_and_memory():
+    tree = DecisionTreeClassifier(buffer_size=4)
+    with pytest.raises(ValueError, match="NaN"):
+        tree.fit([[0.0], [1.0]], [0.0, np.nan])
+    assert tree.nbytes_ == 0  # nothing buffered or trained yet
+    tree.partial_fit(np.zeros((0, 1)), np.zeros(0))  # an empty chunk is ignored
+    assert tree.n_buffered_ == 0
+    tree.partial_fit([[0.0], [1.0]], [0, 1])
+    assert tree.nbytes_ == 2 * 8 + 2 * 8  # buffered X and y only
+    tree.partial_fit([[2.0], [3.0]], [0, 1])  # buffer full: retrain
+    assert tree.n_buffered_ == 0 and tree.nbytes_ > 0

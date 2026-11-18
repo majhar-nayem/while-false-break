@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from numcompute_stream.preprocessing import (
+    Imputer,
     MinMaxScaler,
     OneHotEncoder,
     SimpleImputer,
@@ -58,7 +59,8 @@ def test_unfitted_empty_chunks_and_shape_errors():
 
 
 def test_imputer_updates_with_each_chunk():
-    imputer = SimpleImputer(strategy="mean")
+    assert Imputer is SimpleImputer  # the specification's name for the same class
+    imputer = Imputer(strategy="mean")
     imputer.partial_fit([[1.0, np.nan], [3.0, np.nan]])
     assert imputer.statistics_[0] == 2.0 and np.isnan(imputer.statistics_[1])
     imputer.partial_fit([[np.nan, 10.0], [8.0, 20.0]])
